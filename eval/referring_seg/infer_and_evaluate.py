@@ -15,7 +15,7 @@ from model.GLaMM import GLaMMForCausalLM
 from model.llava import conversation as conversation_lib
 from dataset.dataset import custom_collate_fn
 from dataset.segm_datasets.RefCOCO_Segm_ds import ReferSegmDataset
-from tools.utils import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN, AverageMeter, Summary,
+from tools.utils import (DEFAULT_CLS_TOKEN, DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN, AverageMeter, Summary,
                          intersectionAndUnionGPU, dict_to_cuda)
 
 
@@ -93,6 +93,7 @@ def setup_tokenizer_and_special_tokens(args):
     )
     print('\033[92m' + "---- Initialized tokenizer from: {} ----".format(args.version) + '\033[0m')
     tokenizer.pad_token = tokenizer.unk_token
+    tokenizer.add_tokens([DEFAULT_CLS_TOKEN], special_tokens=True)
 
     if not args.pretrained:
         if args.use_mm_start_end:
@@ -110,6 +111,7 @@ def setup_tokenizer_and_special_tokens(args):
 
     args.bbox_token_idx = tokenizer("<bbox>", add_special_tokens=False).input_ids[0]
     args.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
+    args.cls_token_idx = tokenizer(DEFAULT_CLS_TOKEN, add_special_tokens=False).input_ids[0]
     args.bop_token_idx = tokenizer("<p>", add_special_tokens=False).input_ids[0]
     args.eop_token_idx = tokenizer("</p>", add_special_tokens=False).input_ids[0]
 
@@ -120,7 +122,7 @@ def initialize_model(args, tokenizer):
     """ Initialize the GLaMM model. """
     model_args = {k: getattr(args, k) for k in
                   ["train_mask_decoder", "out_dim", "ce_loss_weight", "dice_loss_weight", "bce_loss_weight",
-                   "seg_token_idx", "vision_pretrained", "vision_tower", "use_mm_start_end", "mm_vision_select_layer",
+                   "seg_token_idx", "cls_token_idx", "vision_pretrained", "vision_tower", "use_mm_start_end", "mm_vision_select_layer",
                    "pretrain_mm_mlp_adapter", "tune_mm_mlp_adapter", "freeze_mm_mlp_adapter", "mm_use_im_start_end",
                    "with_region", "bbox_token_idx", "eop_token_idx", "bop_token_idx"]}
     model_args["num_level_reg_features"] = 4

@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 from model.SAM import build_sam_vit_h
 from model.llava.model.language_model.llava_llama import LlavaLlamaForCausalLM, LlavaLlamaModel
+from tools.utils import IMAGE_TOKEN_INDEX
 
 
 def calculate_dice_loss(predictions: torch.Tensor, ground_truth: torch.Tensor, mask_count: float, scale_factor=1000,
@@ -102,6 +103,7 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
         super().__init__(config)
         self.model = GLaMMModel(config, **kwargs)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.classification_head = nn.Linear(config.hidden_size, 2)
         self.post_init()
 
     def _set_model_configurations(self, config, kwargs):
@@ -112,12 +114,16 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
         config.num_reg_features = kwargs.get("num_level_reg_features", 4)
         config.with_region = kwargs.get("with_region", True)
         config.bbox_token_idx = kwargs.get("bbox_token_idx", 32002)
-        self.seg_token_idx = kwargs.pop("seg_token_idx")
+        self.seg_token_idx = kwargs.pop("seg_token_idx", getattr(config, "seg_token_idx", None))
+        self.cls_token_idx = kwargs.pop("cls_token_idx", getattr(config, "cls_token_idx", None))
+        config.seg_token_idx = self.seg_token_idx
+        config.cls_token_idx = self.cls_token_idx
 
     def _initialize_loss_weights(self, kwargs):
         self.ce_loss_weight = kwargs.pop("ce_loss_weight", None)
         self.dice_loss_weight = kwargs.pop("dice_loss_weight", None)
         self.bce_loss_weight = kwargs.pop("bce_loss_weight", None)
+        self.cls_loss_weight = kwargs.pop("cls_loss_weight", 1.0)
 
     def get_grounding_encoder_embs(self, pixel_values: torch.FloatTensor):
         with torch.no_grad():
@@ -133,7 +139,8 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
     def model_forward(self, global_enc_images: torch.FloatTensor, grounding_enc_images: torch.FloatTensor,
                       bboxes: torch.FloatTensor, input_ids: torch.LongTensor, labels: torch.LongTensor,
                       attention_masks: torch.LongTensor, offset: torch.LongTensor, masks_list: List[torch.FloatTensor],
-                      label_list: List[torch.Tensor], resize_list: List[tuple], inference: bool = False, **kwargs, ):
+                      label_list: List[torch.Tensor], resize_list: List[tuple], inference: bool = False,
+                      cls_labels: torch.LongTensor = None, **kwargs, ):
 
         # Handle inference or training paths
         if inference:
@@ -142,6 +149,11 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
             output, output_hidden_states = self._training_path(
                 global_enc_images, bboxes, input_ids, labels, attention_masks, offset
             )
+
+        cls_logits, cls_valid_mask = self._extract_cls_logits(output_hidden_states, input_ids)
+        image_cls_logits, image_cls_valid_mask = self._aggregate_cls_logits(cls_logits, cls_valid_mask, offset)
+        cls_loss = self._compute_cls_loss(cls_logits, cls_valid_mask, cls_labels, offset)
+
         if grounding_enc_images is not None:
             # Extract grounding encoder image embeddings
             image_embeddings = self.get_grounding_encoder_embs(grounding_enc_images)
@@ -159,19 +171,106 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
             )
 
             if inference:
-                return {"pred_masks": pred_masks, "gt_masks": masks_list, }
+                return {
+                    "pred_masks": pred_masks,
+                    "gt_masks": masks_list,
+                    "cls_logits": image_cls_logits,
+                    "cls_probabilities": image_cls_logits.float().softmax(dim=-1),
+                    "cls_predictions": image_cls_logits.argmax(dim=-1),
+                    "cls_valid_mask": image_cls_valid_mask,
+                }
         else:
             pred_masks = None
 
         # Calculate losses
-        return self._calculate_losses(pred_masks, masks_list, output)
+        loss_dict = self._calculate_losses(pred_masks, masks_list, output)
+        loss_dict["cls_loss"] = cls_loss
+        loss_dict["loss"] = loss_dict["loss"] + cls_loss
+        loss_dict["cls_logits"] = image_cls_logits
+        loss_dict["cls_valid_mask"] = image_cls_valid_mask
+        return loss_dict
 
     def _create_seg_token_mask(self, input_ids):
-        mask = input_ids[:, 1:] == self.seg_token_idx
-        return torch.cat(
-            [torch.zeros((mask.shape[0], 575)).bool().cuda(), mask, torch.zeros((mask.shape[0], 1)).bool().cuda()],
-            dim=1
+        return self._create_expanded_token_mask(input_ids, self.seg_token_idx, select_preceding=True)
+
+    def _create_expanded_token_mask(self, input_ids, token_idx, target_length=None, min_token_index=0,
+                                    select_preceding=False):
+        """Align a text-token mask with the sequence after image-token expansion."""
+        if token_idx is None:
+            length = target_length if target_length is not None else input_ids.shape[1]
+            return torch.zeros((input_ids.shape[0], length), dtype=torch.bool, device=input_ids.device)
+
+        image_expansion = 575
+        expanded_lengths = input_ids.shape[1] + input_ids.eq(IMAGE_TOKEN_INDEX).sum(dim=1) * image_expansion
+        if target_length is None:
+            target_length = int(expanded_lengths.max().item())
+
+        expanded_masks = torch.zeros(
+            (input_ids.shape[0], target_length), dtype=torch.bool, device=input_ids.device)
+        token_positions = torch.arange(input_ids.shape[1], device=input_ids.device)
+        for batch_idx, row in enumerate(input_ids):
+            row_mask = row.eq(token_idx)
+            if min_token_index:
+                row_mask[:min_token_index] = False
+            image_mask = row.eq(IMAGE_TOKEN_INDEX)
+            images_before = image_mask.long().cumsum(dim=0) - image_mask.long()
+            expanded_positions = token_positions + images_before * image_expansion
+            if select_preceding:
+                expanded_positions = expanded_positions - 1
+            valid = row_mask & expanded_positions.ge(0) & expanded_positions.lt(target_length)
+            expanded_masks[batch_idx, expanded_positions[valid]] = True
+        return expanded_masks
+
+    @staticmethod
+    def _get_last_hidden_state(output_hidden_states):
+        return output_hidden_states[-1] if isinstance(output_hidden_states, (tuple, list)) else output_hidden_states
+
+    def _extract_cls_logits(self, output_hidden_states, input_ids, min_token_index=0):
+        last_hidden_state = self._get_last_hidden_state(output_hidden_states)
+        cls_token_mask = self._create_expanded_token_mask(
+            input_ids, self.cls_token_idx, target_length=last_hidden_state.shape[1],
+            min_token_index=min_token_index,
         )
+        cls_valid_mask = cls_token_mask.any(dim=1)
+        cls_positions = cls_token_mask.float().argmax(dim=1)
+        batch_indices = torch.arange(last_hidden_state.shape[0], device=last_hidden_state.device)
+        cls_hidden_states = last_hidden_state[batch_indices, cls_positions]
+        cls_logits = self.classification_head(cls_hidden_states)
+        return cls_logits, cls_valid_mask
+
+    @staticmethod
+    def _aggregate_cls_logits(cls_logits, cls_valid_mask, offset):
+        if offset is None:
+            return cls_logits, cls_valid_mask
+
+        image_logits, image_valid = [], []
+        for start, end in zip(offset[:-1].tolist(), offset[1:].tolist()):
+            valid = cls_valid_mask[start:end]
+            if valid.any():
+                image_logits.append(cls_logits[start:end][valid].mean(dim=0))
+                image_valid.append(True)
+            else:
+                image_logits.append(cls_logits[start:end].mean(dim=0))
+                image_valid.append(False)
+        return torch.stack(image_logits), torch.tensor(image_valid, dtype=torch.bool, device=cls_logits.device)
+
+    def _compute_cls_loss(self, cls_logits, cls_valid_mask, cls_labels, offset):
+        if cls_labels is None or not cls_valid_mask.any():
+            return cls_logits.sum() * 0.0
+
+        cls_labels = torch.as_tensor(cls_labels, device=cls_logits.device, dtype=torch.long).reshape(-1)
+        if offset is not None and cls_labels.numel() == len(offset) - 1:
+            repeats = (offset[1:] - offset[:-1]).to(device=cls_logits.device)
+            cls_labels = torch.repeat_interleave(cls_labels, repeats)
+        if cls_labels.numel() != cls_logits.shape[0]:
+            raise ValueError(
+                f"cls_labels must contain one label per image or conversation; got {cls_labels.numel()} labels "
+                f"for {cls_logits.shape[0]} conversations"
+            )
+        supervised = cls_valid_mask & cls_labels.ge(0)
+        if not supervised.any():
+            return cls_logits.sum() * 0.0
+        return F.cross_entropy(cls_logits[supervised].float(), cls_labels[supervised]) * self.cls_loss_weight
 
     def _inference_path(self, input_ids, global_enc_images, attention_masks):
         length = input_ids.shape[0]
@@ -209,7 +308,7 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
         return torch.cat(global_enc_image_list, dim=0)
 
     def _process_hidden_states(self, output_hidden_states, seg_token_mask, offset, infer=False):
-        hidden_states = [self.model.text_hidden_fcs[0](output_hidden_states[-1])]
+        hidden_states = [self.model.text_hidden_fcs[0](self._get_last_hidden_state(output_hidden_states))]
         last_hidden_state = torch.stack(hidden_states, dim=-1).sum(dim=-1)
         pred_embeddings = last_hidden_state[seg_token_mask]
         seg_token_counts = seg_token_mask.int().sum(-1)
@@ -286,26 +385,37 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
                 "mask_dice_loss": mask_dice_loss, "mask_loss": mask_loss, }
 
     def evaluate(self, global_enc_images, grounding_enc_images, input_ids, resize_list, orig_sizes, max_tokens_new=32,
-                 bboxes=None, ):
+                 bboxes=None, force_cls_token=True):
         with torch.no_grad():
+            generation_kwargs = {}
+            if force_cls_token and self.cls_token_idx is not None:
+                generation_kwargs["forced_decoder_ids"] = [[input_ids.shape[1], self.cls_token_idx]]
             generation_outputs = self.generate(
-                images=global_enc_images, input_ids=input_ids, bboxes=bboxes, max_new_tokens=max_tokens_new,
-                num_beams=1, output_hidden_states=True, return_dict_in_generate=True, )
+                images=global_enc_images, input_ids=input_ids, bboxes=bboxes, max_new_tokens=max(2, max_tokens_new),
+                num_beams=1, output_hidden_states=True, return_dict_in_generate=True, **generation_kwargs)
 
             output_hidden_states = generation_outputs.hidden_states
             generated_output_ids = generation_outputs.sequences
 
-            seg_token_mask = generated_output_ids[:, 1:] == self.seg_token_idx
-            # Adjusting for IMAGE_TOKEN_INDEX (assuming single image at start)
-            seg_token_mask = torch.cat(
-                [torch.zeros((seg_token_mask.shape[0], 575), dtype=torch.bool).cuda(), seg_token_mask], dim=1, )
+            last_hidden_state = self._get_last_hidden_state(output_hidden_states)
+            seg_token_mask = self._create_expanded_token_mask(
+                generated_output_ids, self.seg_token_idx, target_length=last_hidden_state.shape[1],
+                select_preceding=True)
             # Process hidden states
             hidden_states, predicted_embeddings = self._process_hidden_states(
                 output_hidden_states, seg_token_mask, None, infer=True
             )
+            cls_logits, cls_valid_mask = self._extract_cls_logits(
+                output_hidden_states, generated_output_ids, min_token_index=input_ids.shape[1])
+            cls_results = {
+                "logits": cls_logits,
+                "probabilities": cls_logits.float().softmax(dim=-1),
+                "predictions": cls_logits.argmax(dim=-1),
+                "valid_mask": cls_valid_mask,
+            }
             image_embeddings = self.get_grounding_encoder_embs(grounding_enc_images)
             # Generate and post-process masks
             pred_masks = self._generate_and_postprocess_masks(
                 predicted_embeddings, image_embeddings, resize_list, orig_sizes, infer=True
             )
-        return generated_output_ids, pred_masks
+        return generated_output_ids, pred_masks, cls_results

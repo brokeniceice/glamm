@@ -13,7 +13,8 @@ from model.GLaMM import GLaMMForCausalLM
 from model.llava import conversation as conversation_lib
 from model.llava.mm_utils import tokenizer_image_token
 from model.SAM.utils.transforms import ResizeLongestSide
-from tools.utils import DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX
+from tools.utils import (DEFAULT_CLS_TOKEN, DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IMAGE_TOKEN,
+                         IMAGE_TOKEN_INDEX)
 
 
 def parse_args():
@@ -75,8 +76,8 @@ def inference(instructions, image_path):
     bboxes = None  # No box/region is input in GCG task
 
     # Generate output
-    output_ids, pred_masks = model.evaluate(image_clip, image, input_ids, resize_list, original_size_list,
-                                            max_tokens_new=512, bboxes=bboxes)
+    output_ids, pred_masks, cls_results = model.evaluate(
+        image_clip, image, input_ids, resize_list, original_size_list, max_tokens_new=512, bboxes=bboxes)
     output_ids = output_ids[0][output_ids[0] != IMAGE_TOKEN_INDEX]
 
     # Post-processing
@@ -116,11 +117,14 @@ if __name__ == "__main__":
                                               model_max_length=args.model_max_length, padding_side="right",
                                               use_fast=False)
     tokenizer.pad_token = tokenizer.unk_token
+    tokenizer.add_tokens([DEFAULT_CLS_TOKEN], special_tokens=True)
     seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
+    cls_token_idx = tokenizer(DEFAULT_CLS_TOKEN, add_special_tokens=False).input_ids[0]
     torch_dtype = torch.bfloat16  # By default, using bf16
     kwargs = {"torch_dtype": torch_dtype}
     model = GLaMMForCausalLM.from_pretrained(args.hf_model_path, low_cpu_mem_usage=True,
-                                             seg_token_idx=seg_token_idx, **kwargs)
+                                             seg_token_idx=seg_token_idx, cls_token_idx=cls_token_idx, **kwargs)
+    model.resize_token_embeddings(len(tokenizer))
     # Update model config
     model.config.eos_token_id = tokenizer.eos_token_id
     model.config.bos_token_id = tokenizer.bos_token_id

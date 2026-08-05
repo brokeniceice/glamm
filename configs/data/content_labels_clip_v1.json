@@ -1,0 +1,59 @@
+{
+  "schema_version": "content_labels_clip_v1",
+  "model_id": "openai/clip-vit-large-patch14-336",
+  "model_snapshot": "ce19dc912ca5cd21c8a653c79e251e808ccabcd1",
+  "tokenizer_id": "openai/clip-vit-large-patch14",
+  "tokenizer_snapshot": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+  "categories": ["human", "animal", "object", "scene"],
+  "prompts": {
+    "human": [
+      "a photograph where a person is the main subject",
+      "a portrait photograph of a human face",
+      "a close-up photograph of a person",
+      "a photograph of a group of people",
+      "a full-body photograph of a person",
+      "a photograph dominated by human figures",
+      "a photograph of a person's face, hands, or body",
+      "a candid photograph of people"
+    ],
+    "animal": [
+      "a photograph where an animal is the main subject",
+      "a close-up photograph of an animal",
+      "a photograph of a pet such as a dog or cat",
+      "a wildlife photograph",
+      "a photograph of a bird",
+      "a photograph of a fish, reptile, or insect",
+      "a photograph dominated by one or more animals",
+      "an animal in its environment"
+    ],
+    "object": [
+      "a photograph where a physical object is the main subject",
+      "a close-up photograph of an object",
+      "a product photograph",
+      "a photograph of a vehicle or machine",
+      "a photograph of food or a household item",
+      "a still life photograph of objects",
+      "a photograph of furniture, tools, or manufactured items",
+      "an isolated object rather than a person, animal, or wide scene"
+    ],
+    "scene": [
+      "a wide photograph of an outdoor scene",
+      "a landscape or natural scenery photograph",
+      "a photograph of a city, street, or building",
+      "a photograph of an indoor room or architectural space",
+      "a photograph where the environment is the main subject",
+      "a beach, forest, mountain, field, or waterside scene",
+      "a wide view containing many background elements",
+      "a scenic photograph rather than a close-up subject"
+    ]
+  },
+  "views": ["clip_center_crop", "fit_with_clip_mean_padding"],
+  "embedding_dtype": "float16",
+  "calibration_sources": ["OpenImagesV7", "COCO2017"],
+  "manual_review_rules": [
+    "view_disagreement",
+    "top1_top2_margin_below_calibrated_threshold",
+    "source_label_conflict",
+    "all_pass_predictions_of_human"
+  ]
+}

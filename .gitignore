@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Model
+checkpoints
+checkpoints_stage1/
+checkpoints_stage2/
+*.pth
+*.pt
+*.ckpt
+*.bin
+*.safetensors
+
+# Dataset
+datasets
+
+# Output
+outputs/
+
+# Temporary
+*.log
+*.tmp
+
+# VSCode
+.vscode/
+

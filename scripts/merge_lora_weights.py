@@ -34,6 +34,7 @@ def parse_args():
     parser.add_argument("--ce_loss_weight", default=1.0, type=float)
     parser.add_argument("--dice_loss_weight", default=0.5, type=float)
     parser.add_argument("--bce_loss_weight", default=2.0, type=float)
+    parser.add_argument("--cls_loss_weight", default=1.0, type=float)
     parser.add_argument("--lora_target_modules", default="q_proj,v_proj", type=str)
     parser.add_argument("--train_mask_decoder", action="store_true", default=True)
     parser.add_argument("--use_mm_start_end", action="store_true", default=True)

@@ -14,7 +14,8 @@ from dataset.region_datasets.RefCOCO_VG_Region_ds import (RefCocoRegDataset, Ref
 from dataset.caption_datasets.GranD_ShortCaption_ds import GrandShortCaptionDataset
 from dataset.region_datasets.GranD_ReferringRegion_ds import GrandReferRegDataset
 from dataset.segm_datasets.GranD_ReferringSegm_ds import GrandReferSegmDataset
-from tools.utils import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN
+from tools.utils import (DEFAULT_CLS_TOKEN, DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, DEFAULT_IM_END_TOKEN,
+                         DEFAULT_IM_START_TOKEN)
 
 
 class HybridDatasetBase(torch.utils.data.Dataset):
@@ -139,12 +140,20 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
     image_path_list, global_enc_image_list, grounding_enc_image_list = [], [], []
     bboxes_list, conversation_list, masks_list = [], [], []
     label_list, resize_list, questions_list = [], [], []
-    selected_labels_list, offset_list, inferences = [], [0], []
+    selected_labels_list, cls_labels_list, offset_list, inferences = [], [], [0], []
     cnt = 0
 
     # Iterating through the batch
-    for (image_path, global_enc_image, grounding_enc_image, bboxes, conversations, masks, label, resize, questions,
-         sampled_classes) in batch:
+    for sample in batch:
+        if len(sample) == 10:
+            (image_path, global_enc_image, grounding_enc_image, bboxes, conversations, masks, label, resize,
+             questions, sampled_classes) = sample
+            cls_label = None
+        elif len(sample) == 11:
+            (image_path, global_enc_image, grounding_enc_image, bboxes, conversations, masks, label, resize,
+             questions, sampled_classes, cls_label) = sample
+        else:
+            raise ValueError(f"Expected a 10- or 11-field dataset sample, got {len(sample)} fields")
         image_path_list.append(image_path)
         global_enc_image_list.append(global_enc_image)
         grounding_enc_image_list.append(grounding_enc_image)
@@ -155,6 +164,7 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
         resize_list.append(resize)
         questions_list.append(questions)
         selected_labels_list.append(sampled_classes)
+        cls_labels_list.append(cls_label)
         offset_list.append(cnt := cnt + len(conversations))
         inferences.append(inference)
 
@@ -162,6 +172,12 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
     if use_mm_start_end:
         replace_token = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
         conversation_list = [conv.replace(DEFAULT_IMAGE_TOKEN, replace_token) for conv in conversation_list]
+
+    conv = conversation_lib.default_conversation.copy()
+    if not inference:
+        assistant_prefix = conv.sep + conv.roles[1] + ": "
+        cls_prefix = assistant_prefix + DEFAULT_CLS_TOKEN + " "
+        conversation_list = [conversation.replace(assistant_prefix, cls_prefix) for conversation in conversation_list]
 
     # Tokenizing and padding input ids
     input_ids = torch.nn.utils.rnn.pad_sequence(
@@ -171,7 +187,6 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
     attention_masks = input_ids.ne(tokenizer.pad_token_id)
 
     # Preparing targets and handling conversation types
-    conv = conversation_lib.default_conversation.copy()
     targets = input_ids.clone()
     # conv_type == "llava_v1"
     sep = conv.sep + conv.roles[1] + ": "
@@ -202,6 +217,8 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
         "offset": torch.LongTensor(offset_list),
         "questions_list": questions_list,
         "sampled_classes_list": selected_labels_list,
+        "cls_labels": None if all(label is None for label in cls_labels_list) else torch.tensor(
+            [-100 if label is None else int(label) for label in cls_labels_list], dtype=torch.long),
         "inference": inferences[0],
         "conversation_list": conversation_list,
     }
