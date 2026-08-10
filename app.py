@@ -17,7 +17,7 @@ from model.llava.mm_utils import tokenizer_image_token
 from model.SAM.utils.transforms import ResizeLongestSide
 from tools.generate_utils import center_crop, create_feathered_mask
 from tools.utils import (DEFAULT_CLS_TOKEN, DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IMAGE_TOKEN,
-                         IMAGE_TOKEN_INDEX)
+                         DEFAULT_REAL_TOKEN, DEFAULT_FAKE_TOKEN, IMAGE_TOKEN_INDEX)
 from tools.markdown_utils import (markdown_default, examples, title, description, article, process_markdown, colors,
                                   draw_bbox, ImageSketcher)
 
@@ -34,6 +34,8 @@ def parse_args(args):
     parser.add_argument("--local-rank", default=0, type=int, help="node rank")
     parser.add_argument("--use_mm_start_end", action="store_true", default=True)
     parser.add_argument("--conv_type", default="llava_v1", type=str, choices=["llava_v1", "llava_llama_2"])
+    parser.add_argument("--token_strategy", default="fixed_cls_query",
+                        choices=["generated_cls", "fixed_cls_query"])
 
     return parser.parse_args(args)
 
@@ -45,10 +47,12 @@ def setup_tokenizer_and_special_tokens(args):
     )
     print('\033[92m' + "---- Initialized tokenizer from: {} ----".format(args.version) + '\033[0m')
     tokenizer.pad_token = tokenizer.unk_token
-    tokenizer.add_tokens([DEFAULT_CLS_TOKEN], special_tokens=True)
+    tokenizer.add_tokens([DEFAULT_CLS_TOKEN, DEFAULT_REAL_TOKEN, DEFAULT_FAKE_TOKEN], special_tokens=True)
     args.bbox_token_idx = tokenizer("<bbox>", add_special_tokens=False).input_ids[0]
     args.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
     args.cls_token_idx = tokenizer(DEFAULT_CLS_TOKEN, add_special_tokens=False).input_ids[0]
+    args.real_token_idx = tokenizer(DEFAULT_REAL_TOKEN, add_special_tokens=False).input_ids[0]
+    args.fake_token_idx = tokenizer(DEFAULT_FAKE_TOKEN, add_special_tokens=False).input_ids[0]
     args.bop_token_idx = tokenizer("<p>", add_special_tokens=False).input_ids[0]
     args.eop_token_idx = tokenizer("</p>", add_special_tokens=False).input_ids[0]
 
@@ -58,7 +62,8 @@ def setup_tokenizer_and_special_tokens(args):
 def initialize_model(args, tokenizer):
     """ Initialize the GLaMM model. """
     model_args = {k: getattr(args, k) for k in
-                  ["seg_token_idx", "cls_token_idx", "bbox_token_idx", "eop_token_idx", "bop_token_idx"]}
+                  ["seg_token_idx", "cls_token_idx", "real_token_idx", "fake_token_idx", "token_strategy",
+                   "bbox_token_idx", "eop_token_idx", "bop_token_idx"]}
 
     model = GLaMMForCausalLM.from_pretrained(
         args.version, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, **model_args)
@@ -209,6 +214,8 @@ def inference(input_str, all_inputs, follow_up, generate):
         conv.append_message(conv.roles[0], input_str)
         conv.append_message(conv.roles[1], "")
     prompt = conv.get_prompt()
+    if args.token_strategy == "fixed_cls_query":
+        prompt += " " + DEFAULT_CLS_TOKEN
 
     image_np = cv2.imread(input_image)
     image_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
@@ -242,6 +249,9 @@ def inference(input_str, all_inputs, follow_up, generate):
         bboxes=bboxes)
     print("classification (0=real, 1=fake):", cls_results["predictions"].tolist(),
           cls_results["probabilities"].float().cpu().tolist())
+    print("LM verdict (0=real, 1=fake):", cls_results["lm_verdict_predictions"].tolist(),
+          cls_results["lm_verdict_probabilities"].float().cpu().tolist(),
+          "agree:", cls_results["cls_lm_agree"].tolist())
     output_ids = output_ids[0][output_ids[0] != IMAGE_TOKEN_INDEX]
 
     text_output = tokenizer.decode(output_ids, skip_special_tokens=False)

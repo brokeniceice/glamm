@@ -128,13 +128,17 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         else:
             output_hidden_states = hidden_states
 
-        return CausalLMOutputWithPast(
+        result = CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=output_hidden_states,  # outputs.hidden_states,
             attentions=outputs.attentions,
         )
+        # Preserve the multimodal-expanded supervision only for downstream
+        # loss diagnostics/normalization. It is never serialized or generated.
+        result["expanded_labels"] = labels
+        return result
 
     def prepare_inputs_for_generation(
         self,

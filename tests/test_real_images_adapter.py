@@ -64,14 +64,13 @@ class UnifiedRealImageAdapterTest(unittest.TestCase):
         self.assertEqual(adapter.samples[0]["content_category"], "human")
         self.assertEqual(adapter.samples[1]["content_category"], "human")
 
-    def test_real_sample_has_fixed_explanation_and_native_zero_mask(self):
+    def test_real_sample_has_fixed_explanation_and_no_segmentation_target(self):
         sample = UnifiedRealImageAdapter(self.root, sources=("COCO2017",))[0]
         self.assertEqual(sample["class_label"], 0)
         self.assertEqual(sample["verdict_token"], "[REAL]")
         self.assertEqual(sample["explanation"], REAL_EXPLANATION)
-        self.assertEqual(sample["union_evidence_mask"].shape, (6, 8))
-        self.assertEqual(sample["union_evidence_mask"].dtype, np.uint8)
-        self.assertFalse(sample["union_evidence_mask"].any())
+        self.assertIsNone(sample["union_evidence_mask"])
+        self.assertFalse(sample["has_mask_label"])
         self.assertEqual(sample["refs"], [])
 
     def test_manifest_record_does_not_embed_zero_mask(self):

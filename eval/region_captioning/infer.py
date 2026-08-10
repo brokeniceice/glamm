@@ -61,6 +61,8 @@ def inference(instructions, inputs):
     conv.append_message(conv.roles[0], prompt)
     conv.append_message(conv.roles[1], "")
     prompt = conv.get_prompt()
+    if model.token_strategy == "fixed_cls_query":
+        prompt += " " + DEFAULT_CLS_TOKEN
 
     # Read and preprocess the image (Global image encoder - CLIP)
     image_np = cv2.imread(image_path)

@@ -270,4 +270,6 @@ L_consistency =
 
 ## 9. 当前下一步
 
-阶段 1 的 SynthScars image-grouped adapter 与多来源 real adapter 均已完成，详见 `docs/synthscars_image_grouped_adapter.md` 和 `docs/real_images_unified_adapter.md`。下一步完成 PASS 内容分类、跨来源近重复审计，以及与 SynthScars 内容分布匹配的 11,064 张 real 固定选择和 train/validation 划分。此时仍不启动正式训练，也不改动 NPR 专家网络。
+阶段 1 数据层已经冻结完成，详见 `docs/unified_forensics_data_freeze_v1.md`。PASS 6,000 张已完成 GPT 内容分类；内部池在排除 18 个与 SynthScars 官方 test 重合的 train 视觉身份后，固定为 11,046 Real + 11,046 Fake，并按内容类别和 pHash 连通组完成 8:1:1 train/val/test 划分。SynthScars 官方 test 1,000 张和 RAISE clean held-out 998 张保持为独立测试资源。
+
+下一阶段从阶段 2 的结构化统一推理协议开始；此时仍未启动正式训练，也未加载或改动 NPR 专家网络。除非建立新的显式数据版本，否则不得重新扫描、重采样或覆盖 v1 冻结 manifest。

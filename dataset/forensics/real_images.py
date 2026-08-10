@@ -147,7 +147,7 @@ def _map_source_record(source: str, record: Mapping[str, Any], row_index: int) -
         "author": author,
         "has_class_label": True,
         "has_explanation": True,
-        "has_mask_label": True,
+        "has_mask_label": False,
         "refs": [],
         "annotation_ids": [],
     }
@@ -249,7 +249,10 @@ class UnifiedRealImageAdapter:
             with Image.open(image_path) as image:
                 width, height = image.size
             sample["image_size"] = [height, width]
-            sample["union_evidence_mask"] = np.zeros((height, width), dtype=np.uint8)
+            # Authentic samples intentionally have no segmentation target.  Do
+            # not represent "not supervised" as an all-zero foreground mask:
+            # doing so would turn Real images into negative mask supervision.
+            sample["union_evidence_mask"] = None
         return sample
 
     def iter_manifest_records(self, role: str | None = None) -> Iterable[Dict[str, Any]]:

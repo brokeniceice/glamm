@@ -9,6 +9,7 @@ import sys
 import time
 import tqdm
 import random
+import json
 import torch
 import argparse
 import deepspeed
@@ -23,8 +24,16 @@ from model.GLaMM import GLaMMForCausalLM
 from model.llava import conversation as conversation_lib
 
 from dataset.dataset import custom_collate_fn, HybridSegDataset, HybridRegDataset, HybridCapDataset
+from dataset.forensics.unified import UnifiedForensicsDataset
+from eval.forensics import (
+    build_forensics_prediction_records,
+    compute_binary_mask_metrics,
+    compute_empty_prediction_metrics,
+    summarize_detection_records,
+    summarize_localization_records,
+)
 from tools.utils import (DEFAULT_CLS_TOKEN, DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN, AverageMeter, ProgressMeter,
-                         dict_to_cuda, Summary, intersectionAndUnionGPU)
+                         DEFAULT_REAL_TOKEN, DEFAULT_FAKE_TOKEN, dict_to_cuda, Summary, intersectionAndUnionGPU)
 
 from dataset.segm_datasets.RefCOCO_Segm_ds import ReferSegmDataset
 from dataset.region_datasets.RefCOCO_VG_Region_ds import RefCocoGRegDataset, VisualGenomeRegDataset
@@ -73,6 +82,13 @@ def parse_args(args):
     parser.add_argument("--refer_segm_data", default="refcoco||refcoco+||refcocog||refclef", type=str)
     parser.add_argument("--vqa_data", default="llava_instruct_150k", type=str)
     parser.add_argument("--num_classes_per_sample", default=3, type=int)
+    parser.add_argument("--use_forensics_data", action="store_true", help="Use frozen unified Real/Fake manifests")
+    parser.add_argument("--weight_forensics", default=1.0, type=float)
+    parser.add_argument("--forensics_manifest_dir", default="outputs/data_audits/unified_forensics_split_v1")
+    parser.add_argument("--forensics_datasets_root", default="datasets")
+    parser.add_argument("--synthscars_root", default="datasets/SynthScars")
+    parser.add_argument("--token_strategy", default="fixed_cls_query",
+                        choices=["generated_cls", "fixed_cls_query"])
 
     # Training settings
     parser.add_argument("--pretrained", action="store_true")
@@ -80,6 +96,12 @@ def parse_args(args):
     parser.add_argument("--auto_resume", action="store_true")
     parser.add_argument("--weight", default="", type=str)
     parser.add_argument("--lr", default=0.0003, type=float)
+    parser.add_argument("--lora_lr", default=None, type=float)
+    parser.add_argument("--classification_head_lr", default=None, type=float)
+    parser.add_argument("--text_hidden_fcs_lr", default=None, type=float)
+    parser.add_argument("--mask_decoder_lr", default=None, type=float)
+    parser.add_argument("--embedding_lr", default=None, type=float)
+    parser.add_argument("--lm_head_lr", default=None, type=float)
     parser.add_argument("--epochs", default=10, type=int)
     parser.add_argument("--steps_per_epoch", default=500, type=int)
     parser.add_argument("--batch_size", default=2, type=int, help="batch size per device per step")
@@ -93,10 +115,13 @@ def parse_args(args):
     parser.add_argument("--dice_loss_weight", default=0.5, type=float)
     parser.add_argument("--bce_loss_weight", default=2.0, type=float)
     parser.add_argument("--cls_loss_weight", default=1.0, type=float)
+    parser.add_argument("--per_sample_text_loss_normalization", action=argparse.BooleanOptionalAction,
+                        default=False)
     parser.add_argument("--beta1", default=0.9, type=float)
     parser.add_argument("--beta2", default=0.95, type=float)
     parser.add_argument("--gradient_checkpointing", action="store_true", default=True)
     parser.add_argument("--train_mask_decoder", action="store_true", default=True)
+    parser.add_argument("--freeze_region_encoder", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--use_mm_start_end", action="store_true", default=True)
     parser.add_argument("--print_freq", default=1, type=int)
     parser.add_argument("--start_epoch", default=0, type=int)
@@ -133,7 +158,7 @@ def setup_tokenizer_and_special_tokens(args):
     )
     print('\033[92m' + "---- Initialized tokenizer from: {} ----".format(args.version) + '\033[0m')
     tokenizer.pad_token = tokenizer.unk_token
-    tokenizer.add_tokens([DEFAULT_CLS_TOKEN], special_tokens=True)
+    tokenizer.add_tokens([DEFAULT_CLS_TOKEN, DEFAULT_REAL_TOKEN, DEFAULT_FAKE_TOKEN], special_tokens=True)
 
     if not args.pretrained:
         if args.use_mm_start_end:
@@ -152,8 +177,20 @@ def setup_tokenizer_and_special_tokens(args):
     args.bbox_token_idx = tokenizer("<bbox>", add_special_tokens=False).input_ids[0]
     args.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
     args.cls_token_idx = tokenizer(DEFAULT_CLS_TOKEN, add_special_tokens=False).input_ids[0]
+    real_ids = tokenizer(DEFAULT_REAL_TOKEN, add_special_tokens=False).input_ids
+    fake_ids = tokenizer(DEFAULT_FAKE_TOKEN, add_special_tokens=False).input_ids
+    if len(real_ids) != 1 or len(fake_ids) != 1:
+        raise ValueError("[REAL] and [FAKE] must each encode as exactly one token")
+    args.real_token_idx = real_ids[0]
+    args.fake_token_idx = fake_ids[0]
     args.bop_token_idx = tokenizer("<p>", add_special_tokens=False).input_ids[0]
     args.eop_token_idx = tokenizer("</p>", add_special_tokens=False).input_ids[0]
+    print(
+        "Forensic special token ids:",
+        {"[CLS]": args.cls_token_idx, "[REAL]": args.real_token_idx,
+         "[FAKE]": args.fake_token_idx, "[SEG]": args.seg_token_idx},
+        "token_strategy=", args.token_strategy,
+    )
 
     return tokenizer
 
@@ -162,7 +199,8 @@ def initialize_model(args, tokenizer):
     """ Initialize the GLaMM model. """
     model_args = {k: getattr(args, k) for k in
                   ["train_mask_decoder", "out_dim", "ce_loss_weight", "dice_loss_weight", "bce_loss_weight",
-                   "cls_loss_weight", "seg_token_idx", "cls_token_idx", "vision_pretrained", "vision_tower", "use_mm_start_end", "mm_vision_select_layer",
+                   "cls_loss_weight", "seg_token_idx", "cls_token_idx", "real_token_idx", "fake_token_idx",
+                   "token_strategy", "per_sample_text_loss_normalization", "vision_pretrained", "vision_tower", "use_mm_start_end", "mm_vision_select_layer",
                    "pretrain_mm_mlp_adapter", "tune_mm_mlp_adapter", "freeze_mm_mlp_adapter", "mm_use_im_start_end",
                    "with_region", "bbox_token_idx", "eop_token_idx", "bop_token_idx"]}
     model_args["num_level_reg_features"] = 4
@@ -238,6 +276,9 @@ def prepare_model_for_training(model, tokenizer, args):
 
     # Make certain modules trainable
     set_trainable_modules(model)
+    if args.freeze_region_encoder:
+        freeze_unused_region_encoder(model)
+    return model
 
 
 def setup_lora_config(model, args):
@@ -283,6 +324,65 @@ def set_trainable_modules(model):
         print('\033[92m' + "---- Trainable parameters: ----{}".format(trainable_params) + '\033[0m')
 
     count_parameters(model)
+
+
+def freeze_unused_region_encoder(model):
+    """Remove the unused bbox region encoder from Unified Forensics optimization."""
+    matched = 0
+    for name, parameter in model.named_parameters():
+        if "region_encoder" in name:
+            parameter.requires_grad = False
+            matched += parameter.numel()
+    if matched == 0:
+        raise ValueError("No region_encoder parameters were found to freeze")
+    return matched
+
+
+def build_optimizer_parameter_groups(model, args):
+    """Build disjoint named groups for the finalized Unified baseline policy."""
+    lr_values = {
+        "lora": args.lora_lr if args.lora_lr is not None else args.lr,
+        "classification_head": (
+            args.classification_head_lr if args.classification_head_lr is not None else args.lr
+        ),
+        "text_hidden_fcs": args.text_hidden_fcs_lr if args.text_hidden_fcs_lr is not None else args.lr,
+        "mask_decoder": args.mask_decoder_lr if args.mask_decoder_lr is not None else args.lr,
+        "embeddings": args.embedding_lr if args.embedding_lr is not None else args.lr,
+        "lm_head": args.lm_head_lr if args.lm_head_lr is not None else args.lr,
+    }
+    grouped = {name: [] for name in lr_values}
+    unknown = []
+    seen = set()
+    for parameter_name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if "lora_" in parameter_name:
+            group_name = "lora"
+        elif "classification_head" in parameter_name:
+            group_name = "classification_head"
+        elif "text_hidden_fcs" in parameter_name:
+            group_name = "text_hidden_fcs"
+        elif "grounding_encoder.mask_decoder" in parameter_name:
+            group_name = "mask_decoder"
+        elif "embed_tokens" in parameter_name:
+            group_name = "embeddings"
+        elif "lm_head" in parameter_name:
+            group_name = "lm_head"
+        else:
+            unknown.append(parameter_name)
+            continue
+        if id(parameter) in seen:
+            raise ValueError(f"Parameter occurs in multiple optimizer groups: {parameter_name}")
+        seen.add(id(parameter))
+        grouped[group_name].append(parameter)
+    if unknown:
+        raise ValueError(f"Unclassified trainable parameters: {unknown[:20]}")
+    output = []
+    for group_name, parameters in grouped.items():
+        if not parameters:
+            raise ValueError(f"Final optimizer group is empty: {group_name}")
+        output.append({"name": group_name, "params": parameters, "lr": float(lr_values[group_name])})
+    return output
 
 
 def initialize_datasets_and_loaders(args, tokenizer):
@@ -335,10 +435,25 @@ def initialize_datasets_and_loaders(args, tokenizer):
                 else:
                     val_datasets.append(val_dataset_class(**common_ds_args, validation=True))
 
-    return cap_train_dataset, reg_train_dataset, seg_train_dataset, val_datasets
+    forensics_train_dataset = None
+    if args.use_forensics_data:
+        forensics_train_dataset = UnifiedForensicsDataset(
+            args.forensics_manifest_dir, tokenizer, args.vision_tower, split="train",
+            datasets_root=args.forensics_datasets_root, synthscars_root=args.synthscars_root,
+            image_size=args.image_size,
+        )
+        if not args.no_eval:
+            val_datasets.append(UnifiedForensicsDataset(
+                args.forensics_manifest_dir, tokenizer, args.vision_tower, split="val",
+                datasets_root=args.forensics_datasets_root, synthscars_root=args.synthscars_root,
+                image_size=args.image_size,
+            ))
+
+    return cap_train_dataset, reg_train_dataset, seg_train_dataset, forensics_train_dataset, val_datasets
 
 
-def setup_data_loaders(args, cap_train_dataset, reg_train_dataset, seg_train_dataset, val_datasets, tokenizer):
+def setup_data_loaders(args, cap_train_dataset, reg_train_dataset, seg_train_dataset, forensics_train_dataset,
+                       val_datasets, tokenizer):
     sampler_args = {"shuffle": False, "drop_last": False}
     train_loader_args = {"batch_size": args.batch_size, "shuffle": False, "num_workers": args.workers,
                          "pin_memory": False}
@@ -346,12 +461,12 @@ def setup_data_loaders(args, cap_train_dataset, reg_train_dataset, seg_train_dat
                        "pin_memory": False}
     collate_fn_args_train = partial(
         custom_collate_fn, tokenizer=tokenizer, use_mm_start_end=args.use_mm_start_end, local_rank=args.local_rank,
-        inference=False
+        inference=False, token_strategy=args.token_strategy
     )
     inference_mode = args.mask_validation
     collate_fn_args_val = partial(
         custom_collate_fn, tokenizer=tokenizer, use_mm_start_end=args.use_mm_start_end, local_rank=args.local_rank,
-        inference=inference_mode
+        inference=inference_mode, token_strategy=args.token_strategy
     )
 
     # Training loaders
@@ -370,6 +485,11 @@ def setup_data_loaders(args, cap_train_dataset, reg_train_dataset, seg_train_dat
             seg_train_dataset, **sampler_args
         ), collate_fn=collate_fn_args_train, **train_loader_args
     ) if seg_train_dataset is not None else None
+    forensics_train_loader = torch.utils.data.DataLoader(
+        forensics_train_dataset, sampler=torch.utils.data.distributed.DistributedSampler(
+            forensics_train_dataset, **sampler_args
+        ), collate_fn=collate_fn_args_train, **train_loader_args
+    ) if forensics_train_dataset is not None else None
 
     # Validation loader
     val_loader = None
@@ -379,17 +499,21 @@ def setup_data_loaders(args, cap_train_dataset, reg_train_dataset, seg_train_dat
             combined_val_datasets, **val_loader_args, collate_fn=collate_fn_args_val,
             sampler=torch.utils.data.distributed.DistributedSampler(combined_val_datasets, **sampler_args), )
 
-    return cap_train_loader, reg_train_loader, seg_train_loader, val_loader
+    return cap_train_loader, reg_train_loader, seg_train_loader, forensics_train_loader, val_loader
 
 
 def initialize_deepspeed(model, tokenizer, args):
+    optimizer_groups = build_optimizer_parameter_groups(model, args)
+    group_lrs = [group["lr"] for group in optimizer_groups]
     ds_config = {"train_micro_batch_size_per_gpu": args.batch_size,
                  "gradient_accumulation_steps": args.grad_accumulation_steps,
                  "optimizer": {"type": "AdamW", "params": {"lr": args.lr, "weight_decay": 0.0,
                                                            "betas": (args.beta1, args.beta2)}},
                  "scheduler": {"type": "WarmupDecayLR",
-                               "params": {"total_num_steps": args.epochs * args.steps_per_epoch, "warmup_min_lr": 0,
-                                          "warmup_max_lr": args.lr, "warmup_num_steps": 100, "warmup_type": "linear"}},
+                                          "params": {"total_num_steps": args.epochs * args.steps_per_epoch,
+                                          "warmup_min_lr": [0.0] * len(group_lrs),
+                                          "warmup_max_lr": group_lrs,
+                                          "warmup_num_steps": 100, "warmup_type": "linear"}},
                  "fp16": {"enabled": args.precision == "fp16"}, "bf16": {"enabled": args.precision == "bf16"},
                  "gradient_clipping": 1.0,
                  "zero_optimization": {"stage": 2, "contiguous_gradients": True, "overlap_comm": True,
@@ -397,8 +521,9 @@ def initialize_deepspeed(model, tokenizer, args):
                                        "allgather_bucket_size": 5e8}, }
 
     model_engine, optimizer, _, scheduler = deepspeed.initialize(
-        model=model, model_parameters=model.parameters(), collate_fn=partial(
-            custom_collate_fn, tokenizer=tokenizer, use_mm_start_end=args.use_mm_start_end, local_rank=args.local_rank
+        model=model, model_parameters=optimizer_groups, collate_fn=partial(
+            custom_collate_fn, tokenizer=tokenizer, use_mm_start_end=args.use_mm_start_end,
+            local_rank=args.local_rank, token_strategy=args.token_strategy
         ), config=ds_config
     )
 
@@ -422,15 +547,16 @@ def resume_training_from_checkpoint(model_engine, args):
 def main(args):
     tokenizer = setup_tokenizer_and_special_tokens(args)
     model = initialize_model(args, tokenizer)
-    prepare_model_for_training(model, tokenizer, args)
+    model = prepare_model_for_training(model, tokenizer, args)
 
     model_engine, optimizer, scheduler = initialize_deepspeed(model, tokenizer, args)
     resume_training_from_checkpoint(model_engine, args)
 
-    cap_train_dataset, reg_train_dataset, seg_train_dataset, val_datasets = (
+    cap_train_dataset, reg_train_dataset, seg_train_dataset, forensics_train_dataset, val_datasets = (
         initialize_datasets_and_loaders(args, tokenizer))
-    cap_train_loader, reg_train_loader, seg_train_loader, val_loader = (
-        setup_data_loaders(args, cap_train_dataset, reg_train_dataset, seg_train_dataset, val_datasets, tokenizer))
+    cap_train_loader, reg_train_loader, seg_train_loader, forensics_train_loader, val_loader = (
+        setup_data_loaders(args, cap_train_dataset, reg_train_dataset, seg_train_dataset,
+                           forensics_train_dataset, val_datasets, tokenizer))
 
     # Determine active datasets and their weights
     active_dataloaders = []
@@ -445,15 +571,21 @@ def main(args):
     if args.use_segm_data:
         active_dataloaders.append(('seg', seg_train_loader))
         weights.append(args.weight_segm)
+    if args.use_forensics_data:
+        active_dataloaders.append(('forensics', forensics_train_loader))
+        weights.append(args.weight_forensics)
 
     # Assert that at least one dataset is active
     assert active_dataloaders, "Error: At least one dataset (segm, reg, or cap) must be active."
 
     dataset_iters = {'cap': iter(cap_train_loader) if args.use_cap_data else None,
                      'reg': iter(reg_train_loader) if args.use_reg_data else None,
-                     'seg': iter(seg_train_loader) if args.use_segm_data else None, }
+                     'seg': iter(seg_train_loader) if args.use_segm_data else None,
+                     'forensics': iter(forensics_train_loader) if args.use_forensics_data else None, }
 
     writer = initialize_environment(args)
+    if args.local_rank == 0:
+        tokenizer.save_pretrained(os.path.join(args.log_dir, "tokenizer"))
 
     if args.eval_only:
         cur_val_loss = validate_model_performance(val_loader, model_engine, 0, writer, args)[0]
@@ -482,25 +614,28 @@ def main(args):
             save_checkpoint(model_engine, args, epoch, 'giou-ciou', f"{giou:.4f}-{ciou:.4f}", is_best)
         else:
             cur_val_loss = validate_model_performance(val_loader, model_engine, epoch, writer, args)
-            is_best = cur_val_loss < best_val_loss
-            best_val_loss = min(cur_val_loss, best_val_loss)
+            is_best, best_val_loss = update_best_validation_total_loss(cur_val_loss, best_val_loss)
             if args.local_rank == 0:  # Log the progress
                 print(f"Epoch: {epoch}, Current Validation Loss: {cur_val_loss:.4f}, Best Validation Loss: {best_val_loss:}")
             save_checkpoint(model_engine, args, epoch, 'loss', f"{cur_val_loss:.4f}", is_best)
 
 
 def save_checkpoint(model_engine, args, epoch, metric_name, metric_value, is_best):
-    """ Saves the model checkpoint. """
-    # If the checkpoint is the best, save it in ckpt_model_best, else in ckpt_model_last_epoch
-    save_dir_name = "ckpt_model_best" if is_best else "ckpt_model_last_epoch"
-    save_dir = os.path.join(args.log_dir, save_dir_name)
-    # Ensure the directory exists
-    if args.local_rank == 0:
-        os.makedirs(save_dir, exist_ok=True)
-        ckpt_filename = f"epoch_{epoch}_val_{metric_name}_{metric_value}.pth"
-        torch.save({"epoch": epoch, f"val_{metric_name}": metric_value}, os.path.join(save_dir, ckpt_filename))
-    torch.distributed.barrier()
-    model_engine.save_checkpoint(save_dir)
+    """Always save ``last`` and additionally refresh ``best`` when selected."""
+    destinations = ["ckpt_model_last_epoch"]
+    if is_best:
+        destinations.append("ckpt_model_best")
+    for save_dir_name in destinations:
+        save_dir = os.path.join(args.log_dir, save_dir_name)
+        if args.local_rank == 0:
+            os.makedirs(save_dir, exist_ok=True)
+            ckpt_filename = f"epoch_{epoch}_val_{metric_name}_{metric_value}.pth"
+            torch.save(
+                {"epoch": epoch, f"val_{metric_name}": metric_value},
+                os.path.join(save_dir, ckpt_filename),
+            )
+        torch.distributed.barrier()
+        model_engine.save_checkpoint(save_dir)
 
 
 def train(active_datasets, model, epoch, scheduler, writer, dataset_iters, args, step_choices):
@@ -538,7 +673,10 @@ def train(active_datasets, model, epoch, scheduler, writer, dataset_iters, args,
                 "mask_bce_loss": AverageMeter("MaskBCELoss", ":.4f"),
                 "mask_dice_loss": AverageMeter("MaskDICELoss", ":.4f"),
                 "mask_loss": AverageMeter("MaskLoss", ":.4f"),
-                "cls_loss": AverageMeter("ClsLoss", ":.4f")}
+                "cls_loss": AverageMeter("ClsLoss", ":.4f"),
+                "seg_missing_pred_count": AverageMeter("SegMissingPred", ":.1f"),
+                "seg_count_mismatch_count": AverageMeter("SegCountMismatch", ":.1f"),
+                "seg_unexpected_pred_count": AverageMeter("SegUnexpectedPred", ":.1f")}
     progress = ProgressMeter(args.steps_per_epoch, list(trackers.values()), prefix=f"Epoch: [{epoch}]")
 
     model.train()
@@ -645,6 +783,8 @@ def validate_model_performance(validation_loader, training_model, current_epoch,
         # Prepare model for validation phase
         # Hack to get the loss
         training_model.train()
+        forensics_records = []
+        tf_localization_records = []
 
         for data_batch in tqdm.tqdm(validation_loader):
             # Prepare data and convert relevant tensors to bfloat16
@@ -656,6 +796,27 @@ def validate_model_performance(validation_loader, training_model, current_epoch,
             # Model inference without gradient tracking
             with torch.no_grad():
                 predictions = training_model(**data_batch)
+            cls_labels = data_batch.get("cls_labels")
+            if cls_labels is not None and cls_labels.ge(0).all():
+                forensics_records.extend(build_forensics_prediction_records(data_batch, predictions))
+                pred_masks = predictions.get("pred_masks")
+                if pred_masks is not None:
+                    for index, is_valid in enumerate(data_batch["seg_valid"].detach().cpu().tolist()):
+                        if not is_valid:
+                            continue
+                        gt_mask = data_batch["masks_list"][index]
+                        pred_mask = pred_masks[index]
+                        has_prediction = pred_mask is not None and pred_mask.shape[0] > 0
+                        mask_metrics = (
+                            compute_binary_mask_metrics(pred_mask, gt_mask)
+                            if has_prediction else compute_empty_prediction_metrics(gt_mask)
+                        )
+                        tf_localization_records.append({
+                            **mask_metrics,
+                            "content_type": data_batch["content_categories"][index],
+                            "seg_triggered": has_prediction,
+                            "has_pred_mask": has_prediction,
+                        })
             # Update performance metrics)
             for key, tracker in trackers.items():
                 tracker.update(predictions[key].item(), data_batch["global_enc_images"].size(0))
@@ -663,13 +824,74 @@ def validate_model_performance(validation_loader, training_model, current_epoch,
         # Synchronize metrics across processes
         for tracker in trackers.values():
             tracker.all_reduce()
-        # Calculate average validation loss
-        avg_val_loss = trackers["ce_loss"].avg
+        if args.distributed:
+            gathered_records = [None] * torch.distributed.get_world_size()
+            torch.distributed.all_gather_object(gathered_records, forensics_records)
+            forensics_records = [record for records in gathered_records for record in records]
+            gathered_tf_records = [None] * torch.distributed.get_world_size()
+            torch.distributed.all_gather_object(gathered_tf_records, tf_localization_records)
+            tf_localization_records = [record for records in gathered_tf_records for record in records]
+        if args.local_rank == 0 and forensics_records:
+            prediction_path = os.path.join(args.log_dir, f"forensics_predictions_epoch_{current_epoch}.jsonl")
+            with open(prediction_path, "w", encoding="utf-8") as handle:
+                for record in forensics_records:
+                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            detection_metrics = summarize_detection_records(forensics_records)
+            tf_metrics = summarize_localization_records(tf_localization_records, autoregressive=False)
+            metrics_path = os.path.join(args.log_dir, f"forensics_metrics_epoch_{current_epoch}.json")
+            with open(metrics_path, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "classification": detection_metrics["classification_head"],
+                    "lm_verdict": detection_metrics["lm_verdict"],
+                    "cls_lm_agreement": detection_metrics["cls_lm_agreement"],
+                    "tf_full_context": tf_metrics,
+                }, handle, indent=2, ensure_ascii=False)
+                handle.write("\n")
+            tensorboard_writer.add_scalar(
+                "val/classification_accuracy", detection_metrics["classification_head"]["accuracy"],
+                current_epoch,
+            )
+            tensorboard_writer.add_scalar(
+                "val/lm_verdict_accuracy", detection_metrics["lm_verdict"]["accuracy"], current_epoch
+            )
+            tensorboard_writer.add_scalar(
+                "val/cls_lm_agreement", detection_metrics["cls_lm_agreement"], current_epoch
+            )
+            if tf_metrics["mean_iou"] is not None:
+                tensorboard_writer.add_scalar("val/tf_mean_iou", tf_metrics["mean_iou"], current_epoch)
+                tensorboard_writer.add_scalar("val/tf_global_iou", tf_metrics["global_iou"], current_epoch)
+                tensorboard_writer.add_scalar(
+                    "val/tf_mean_pixel_f1", tf_metrics["mean_pixel_f1"], current_epoch
+                )
+                tensorboard_writer.add_scalar(
+                    "val/tf_global_pixel_f1", tf_metrics["global_pixel_f1"], current_epoch
+                )
+        # Primary validation objective must match the complete training loss;
+        # CE alone is a diagnostic component and must never masquerade as total.
+        avg_val_loss = trackers["loss"].avg
         # Tensorboard logging for primary process
         if args.local_rank == 0:
-            tensorboard_writer.add_scalar("val/loss", avg_val_loss, current_epoch)
+            tensorboard_writer.add_scalar("val/total_loss", avg_val_loss, current_epoch)
 
         return avg_val_loss
+
+
+def validation_total_loss_from_output(output_dict):
+    """Return and verify the full text+classification+conditional-mask objective."""
+    expected = (
+        output_dict["ce_loss"] + output_dict["cls_loss"]
+        + output_dict["mask_bce_loss"] + output_dict["mask_dice_loss"]
+    )
+    if not torch.allclose(output_dict["loss"], expected, atol=1e-6, rtol=1e-6):
+        raise ValueError("Model loss does not equal text+cls+BCE+Dice validation objective")
+    return output_dict["loss"]
+
+
+def update_best_validation_total_loss(current_total_loss, best_total_loss):
+    """Primary selector: validation total loss only, lower is better."""
+    current = float(current_total_loss)
+    best = float(best_total_loss)
+    return current < best, min(current, best)
 
 
 if __name__ == "__main__":

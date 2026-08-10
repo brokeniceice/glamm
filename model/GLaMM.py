@@ -2,10 +2,103 @@ import torch
 import torch.nn as nn
 from typing import List
 import torch.nn.functional as F
+import warnings
 
 from model.SAM import build_sam_vit_h
 from model.llava.model.language_model.llava_llama import LlavaLlamaForCausalLM, LlavaLlamaModel
 from tools.utils import IMAGE_TOKEN_INDEX
+
+
+def per_sample_causal_text_loss(logits: torch.Tensor, labels: torch.Tensor,
+                                ignore_index: int = -100) -> torch.Tensor:
+    """Mean causal CE per sample, then mean over supervised samples."""
+    shift_logits = logits[:, :-1].float().contiguous()
+    shift_labels = labels[:, 1:].contiguous()
+    token_losses = F.cross_entropy(
+        shift_logits.reshape(-1, shift_logits.shape[-1]), shift_labels.reshape(-1),
+        ignore_index=ignore_index, reduction="none",
+    ).reshape_as(shift_labels)
+    valid = shift_labels.ne(ignore_index)
+    counts = valid.sum(dim=1)
+    supervised = counts.gt(0)
+    if not supervised.any():
+        return logits.sum() * 0.0
+    sample_means = (token_losses * valid).sum(dim=1) / counts.clamp_min(1)
+    return sample_means[supervised].mean()
+
+
+def causal_text_loss_per_sample(logits: torch.Tensor, labels: torch.Tensor,
+                                ignore_index: int = -100):
+    shift_logits = logits[:, :-1].float().contiguous()
+    shift_labels = labels[:, 1:].contiguous()
+    token_losses = F.cross_entropy(
+        shift_logits.reshape(-1, shift_logits.shape[-1]), shift_labels.reshape(-1),
+        ignore_index=ignore_index, reduction="none",
+    ).reshape_as(shift_labels)
+    valid = shift_labels.ne(ignore_index)
+    counts = valid.sum(dim=1)
+    means = (token_losses * valid).sum(dim=1) / counts.clamp_min(1)
+    return means, counts.gt(0)
+
+
+def diagnostic_domain_text_losses(logits, labels, cls_labels):
+    means, supervised = causal_text_loss_per_sample(logits, labels)
+    cls_labels = torch.as_tensor(cls_labels, device=means.device, dtype=torch.long).reshape(-1)
+    if cls_labels.numel() != means.numel():
+        raise ValueError(f"Got {cls_labels.numel()} domain labels for {means.numel()} LM sequences")
+    zero = means.sum() * 0.0
+    real = supervised & cls_labels.eq(0)
+    fake = supervised & cls_labels.eq(1)
+    return means[real].mean() if real.any() else zero, means[fake].mean() if fake.any() else zero
+
+
+def mask_gradient_rows(gradient: torch.Tensor, trainable_row_ids) -> torch.Tensor:
+    """Option-B audit helper: retain gradients only for explicitly allowed vocabulary rows."""
+    masked = torch.zeros_like(gradient)
+    row_ids = torch.as_tensor(trainable_row_ids, device=gradient.device, dtype=torch.long)
+    if row_ids.numel():
+        if row_ids.lt(0).any() or row_ids.ge(gradient.shape[0]).any():
+            raise IndexError("Vocabulary gradient row id is out of range")
+        masked.index_copy_(0, row_ids, gradient.index_select(0, row_ids))
+    return masked
+
+
+def extract_seg_predictor_hidden(last_hidden_state: torch.Tensor, input_ids: torch.Tensor,
+                                 seg_token_idx: int, image_expansion: int = 575,
+                                 image_token_idx: int = IMAGE_TOKEN_INDEX,
+                                 min_token_index: int = 0):
+    """Extract the causal states that predict ``[SEG]``.
+
+    A causal LM logit at sequence position ``k`` predicts token ``k + 1``.
+    Consequently, when ``[SEG]`` is present at text-token position ``s``, the
+    grounding representation is the hidden state at expanded position
+    ``s - 1`` (plus the visual-token expansion offset), never the hidden state
+    of ``[SEG]`` itself.  Both teacher-forced and generated sequences use this
+    helper so that their indexing convention cannot diverge.
+    """
+    if last_hidden_state.ndim != 3 or input_ids.ndim != 2:
+        raise ValueError("Expected hidden states [B,L,H] and input ids [B,T]")
+    if last_hidden_state.shape[0] != input_ids.shape[0]:
+        raise ValueError("Hidden-state and token batch sizes differ")
+
+    predictor_states, predictor_positions = [], []
+    text_positions = torch.arange(input_ids.shape[1], device=input_ids.device)
+    for row_index, row in enumerate(input_ids):
+        seg_mask = row.eq(seg_token_idx)
+        if min_token_index:
+            seg_mask[:min_token_index] = False
+        image_mask = row.eq(image_token_idx)
+        images_before = image_mask.long().cumsum(dim=0) - image_mask.long()
+        expanded_seg_positions = text_positions + images_before * image_expansion
+        positions = expanded_seg_positions[seg_mask] - 1
+        if positions.numel() and (positions.lt(0).any() or positions.ge(last_hidden_state.shape[1]).any()):
+            raise IndexError(
+                f"[SEG] predictor position is outside expanded hidden sequence: {positions.tolist()} "
+                f"vs length {last_hidden_state.shape[1]}"
+            )
+        predictor_positions.append(positions)
+        predictor_states.append(last_hidden_state[row_index, positions])
+    return predictor_states, predictor_positions
 
 
 def calculate_dice_loss(predictions: torch.Tensor, ground_truth: torch.Tensor, mask_count: float, scale_factor=1000,
@@ -104,6 +197,8 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
         self.model = GLaMMModel(config, **kwargs)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.classification_head = nn.Linear(config.hidden_size, 2)
+        self.register_buffer("seg_missing_pred_total", torch.zeros((), dtype=torch.long), persistent=False)
+        self.register_buffer("seg_count_mismatch_total", torch.zeros((), dtype=torch.long), persistent=False)
         self.post_init()
 
     def _set_model_configurations(self, config, kwargs):
@@ -116,8 +211,19 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
         config.bbox_token_idx = kwargs.get("bbox_token_idx", 32002)
         self.seg_token_idx = kwargs.pop("seg_token_idx", getattr(config, "seg_token_idx", None))
         self.cls_token_idx = kwargs.pop("cls_token_idx", getattr(config, "cls_token_idx", None))
+        self.real_token_idx = kwargs.pop("real_token_idx", getattr(config, "real_token_idx", None))
+        self.fake_token_idx = kwargs.pop("fake_token_idx", getattr(config, "fake_token_idx", None))
+        self.token_strategy = kwargs.pop("token_strategy", getattr(config, "token_strategy", "generated_cls"))
+        self.per_sample_text_loss_normalization = kwargs.pop(
+            "per_sample_text_loss_normalization",
+            getattr(config, "per_sample_text_loss_normalization", False),
+        )
         config.seg_token_idx = self.seg_token_idx
         config.cls_token_idx = self.cls_token_idx
+        config.real_token_idx = self.real_token_idx
+        config.fake_token_idx = self.fake_token_idx
+        config.token_strategy = self.token_strategy
+        config.per_sample_text_loss_normalization = self.per_sample_text_loss_normalization
 
     def _initialize_loss_weights(self, kwargs):
         self.ce_loss_weight = kwargs.pop("ce_loss_weight", None)
@@ -134,17 +240,23 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
         return self.model.grounding_encoder.image_encoder(image.unsqueeze(0))
 
     def forward(self, **kwargs):
-        return super().forward(**kwargs) if "past_key_values" in kwargs else self.model_forward(**kwargs)
+        if "past_key_values" in kwargs:
+            if kwargs["past_key_values"] is None:
+                kwargs.pop("past_key_values")
+            return super().forward(**kwargs)
+        return self.model_forward(**kwargs)
 
     def model_forward(self, global_enc_images: torch.FloatTensor, grounding_enc_images: torch.FloatTensor,
                       bboxes: torch.FloatTensor, input_ids: torch.LongTensor, labels: torch.LongTensor,
                       attention_masks: torch.LongTensor, offset: torch.LongTensor, masks_list: List[torch.FloatTensor],
                       label_list: List[torch.Tensor], resize_list: List[tuple], inference: bool = False,
-                      cls_labels: torch.LongTensor = None, **kwargs, ):
+                      cls_labels: torch.LongTensor = None, seg_valid: torch.BoolTensor = None, **kwargs, ):
 
         # Handle inference or training paths
         if inference:
-            output_hidden_states = self._inference_path(input_ids, global_enc_images, attention_masks)
+            output, output_hidden_states = self._inference_path(
+                input_ids, global_enc_images, attention_masks, offset, bboxes
+            )
         else:
             output, output_hidden_states = self._training_path(
                 global_enc_images, bboxes, input_ids, labels, attention_masks, offset
@@ -153,48 +265,88 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
         cls_logits, cls_valid_mask = self._extract_cls_logits(output_hidden_states, input_ids)
         image_cls_logits, image_cls_valid_mask = self._aggregate_cls_logits(cls_logits, cls_valid_mask, offset)
         cls_loss = self._compute_cls_loss(cls_logits, cls_valid_mask, cls_labels, offset)
+        lm_verdict_logits, lm_verdict_valid = self._extract_lm_verdict_logits(output.logits, input_ids)
+        image_lm_verdict_logits, image_lm_verdict_valid = self._aggregate_cls_logits(
+            lm_verdict_logits, lm_verdict_valid, offset
+        )
 
         if grounding_enc_images is not None:
             # Extract grounding encoder image embeddings
             image_embeddings = self.get_grounding_encoder_embs(grounding_enc_images)
             assert image_embeddings.shape[0] == len(offset) - 1
 
-            # Create segmentation token mask
-            seg_token_mask = self._create_seg_token_mask(input_ids)
-
-            # Process hidden states
-            hidden_states, pred_embeddings = self._process_hidden_states(output_hidden_states, seg_token_mask, offset)
+            # Extract the causal state immediately preceding each [SEG].
+            pred_embeddings, _ = self._extract_projected_seg_predictor_hidden(
+                output_hidden_states, input_ids, offset
+            )
 
             # Generate and post-process masks
             pred_masks = self._generate_and_postprocess_masks(
                 pred_embeddings, image_embeddings, resize_list, label_list
             )
 
-            if inference:
-                return {
-                    "pred_masks": pred_masks,
-                    "gt_masks": masks_list,
-                    "cls_logits": image_cls_logits,
-                    "cls_probabilities": image_cls_logits.float().softmax(dim=-1),
-                    "cls_predictions": image_cls_logits.argmax(dim=-1),
-                    "cls_valid_mask": image_cls_valid_mask,
-                }
         else:
             pred_masks = None
 
+        if inference:
+            cls_probabilities = image_cls_logits.float().softmax(dim=-1)
+            lm_probabilities = image_lm_verdict_logits.float().softmax(dim=-1)
+            return {
+                "pred_masks": pred_masks,
+                "gt_masks": masks_list,
+                "cls_logits": image_cls_logits,
+                "cls_probabilities": cls_probabilities,
+                "cls_predictions": image_cls_logits.argmax(dim=-1),
+                "cls_valid_mask": image_cls_valid_mask,
+                "lm_verdict_logits": image_lm_verdict_logits,
+                "lm_verdict_probabilities": lm_probabilities,
+                "lm_verdict_predictions": image_lm_verdict_logits.argmax(dim=-1),
+                "lm_verdict_valid_mask": image_lm_verdict_valid,
+                "cls_lm_agree": image_cls_logits.argmax(dim=-1).eq(
+                    image_lm_verdict_logits.argmax(dim=-1)
+                ) & image_cls_valid_mask & image_lm_verdict_valid,
+                "cls_pred": image_cls_logits.argmax(dim=-1),
+                "cls_prob": cls_probabilities[:, 1],
+                "lm_verdict_pred": image_lm_verdict_logits.argmax(dim=-1),
+                "lm_verdict_prob": lm_probabilities[:, 1],
+            }
+
         # Calculate losses
-        loss_dict = self._calculate_losses(pred_masks, masks_list, output)
+        loss_dict = self._calculate_losses(pred_masks, masks_list, output, seg_valid)
         loss_dict["cls_loss"] = cls_loss
         loss_dict["loss"] = loss_dict["loss"] + cls_loss
+        if cls_labels is not None:
+            domain_labels = torch.as_tensor(cls_labels, device=input_ids.device, dtype=torch.long).reshape(-1)
+            if offset is not None and domain_labels.numel() == len(offset) - 1:
+                domain_labels = torch.repeat_interleave(
+                    domain_labels, (offset[1:] - offset[:-1]).to(device=input_ids.device)
+                )
+            real_text_loss, fake_text_loss = diagnostic_domain_text_losses(
+                output.logits, output.get("expanded_labels", labels), domain_labels
+            )
+        else:
+            real_text_loss = fake_text_loss = output.loss * 0.0
+        loss_dict["real_text_loss"] = real_text_loss
+        loss_dict["fake_text_loss"] = fake_text_loss
         loss_dict["cls_logits"] = image_cls_logits
         loss_dict["cls_valid_mask"] = image_cls_valid_mask
+        loss_dict["lm_verdict_logits"] = image_lm_verdict_logits
+        loss_dict["lm_verdict_valid_mask"] = image_lm_verdict_valid
+        loss_dict["lm_verdict_probabilities"] = image_lm_verdict_logits.float().softmax(dim=-1)
+        loss_dict["lm_verdict_predictions"] = image_lm_verdict_logits.argmax(dim=-1)
+        loss_dict["cls_lm_agree"] = image_cls_logits.argmax(dim=-1).eq(
+            image_lm_verdict_logits.argmax(dim=-1)
+        ) & image_cls_valid_mask & image_lm_verdict_valid
+        loss_dict["cls_pred"] = image_cls_logits.argmax(dim=-1)
+        loss_dict["cls_prob"] = image_cls_logits.float().softmax(dim=-1)[:, 1]
+        loss_dict["lm_verdict_pred"] = image_lm_verdict_logits.argmax(dim=-1)
+        loss_dict["lm_verdict_prob"] = image_lm_verdict_logits.float().softmax(dim=-1)[:, 1]
+        # Expose teacher-forced masks for validation diagnostics. This is a
+        # non-loss output and does not alter training gradients or weighting.
+        loss_dict["pred_masks"] = pred_masks
         return loss_dict
 
-    def _create_seg_token_mask(self, input_ids):
-        return self._create_expanded_token_mask(input_ids, self.seg_token_idx, select_preceding=True)
-
-    def _create_expanded_token_mask(self, input_ids, token_idx, target_length=None, min_token_index=0,
-                                    select_preceding=False):
+    def _create_expanded_token_mask(self, input_ids, token_idx, target_length=None, min_token_index=0):
         """Align a text-token mask with the sequence after image-token expansion."""
         if token_idx is None:
             length = target_length if target_length is not None else input_ids.shape[1]
@@ -215,8 +367,6 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
             image_mask = row.eq(IMAGE_TOKEN_INDEX)
             images_before = image_mask.long().cumsum(dim=0) - image_mask.long()
             expanded_positions = token_positions + images_before * image_expansion
-            if select_preceding:
-                expanded_positions = expanded_positions - 1
             valid = row_mask & expanded_positions.ge(0) & expanded_positions.lt(target_length)
             expanded_masks[batch_idx, expanded_positions[valid]] = True
         return expanded_masks
@@ -237,6 +387,25 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
         cls_hidden_states = last_hidden_state[batch_indices, cls_positions]
         cls_logits = self.classification_head(cls_hidden_states)
         return cls_logits, cls_valid_mask
+
+    def _extract_lm_verdict_logits(self, lm_logits, input_ids, min_token_index=0):
+        """Return next-token Real/Fake logits at the fixed CLS query position."""
+        if self.real_token_idx is None or self.fake_token_idx is None:
+            empty = lm_logits.new_zeros((input_ids.shape[0], 2))
+            valid = torch.zeros(input_ids.shape[0], dtype=torch.bool, device=input_ids.device)
+            return empty, valid
+        cls_token_mask = self._create_expanded_token_mask(
+            input_ids,
+            self.cls_token_idx,
+            target_length=lm_logits.shape[1],
+            min_token_index=min_token_index,
+        )
+        valid = cls_token_mask.any(dim=1)
+        positions = cls_token_mask.float().argmax(dim=1)
+        batch_indices = torch.arange(lm_logits.shape[0], device=lm_logits.device)
+        next_token_logits = lm_logits[batch_indices, positions]
+        verdict_logits = next_token_logits[:, [self.real_token_idx, self.fake_token_idx]]
+        return verdict_logits, valid
 
     @staticmethod
     def _aggregate_cls_logits(cls_logits, cls_valid_mask, offset):
@@ -272,30 +441,28 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
             return cls_logits.sum() * 0.0
         return F.cross_entropy(cls_logits[supervised].float(), cls_labels[supervised]) * self.cls_loss_weight
 
-    def _inference_path(self, input_ids, global_enc_images, attention_masks):
-        length = input_ids.shape[0]
-        global_enc_images_extended = global_enc_images.expand(length, -1, -1, -1).contiguous()
-
-        # Process and return inference output
-        output_hidden_states = []
-        for i in range(input_ids.shape[0]):
-            output_i = super().forward(
-                images=global_enc_images_extended[i:i + 1], attention_mask=attention_masks[i:i + 1],
-                input_ids=input_ids[i:i + 1], output_hidden_states=True, )
-            output_hidden_states.append(output_i.hidden_states)
-            torch.cuda.empty_cache()
-
-        output_hidden_states = torch.cat(output_hidden_states, dim=0)
-        output_hidden_states = [output_hidden_states]
-        return output_hidden_states
+    def _inference_path(self, input_ids, global_enc_images, attention_masks, offset, bboxes):
+        global_enc_images = self._prepare_global_enc_image(global_enc_images, offset)
+        output = super().forward(
+            images=global_enc_images,
+            attention_mask=attention_masks,
+            input_ids=input_ids,
+            output_hidden_states=True,
+            bboxes=bboxes,
+        )
+        return output, output.hidden_states
 
     def _training_path(self, global_enc_images, bboxes, input_ids, labels, attention_masks, offset):
-        global_enc_images = self._prepare_global_enc_image(global_enc_images, offset)
+        if global_enc_images is not None:
+            global_enc_images = self._prepare_global_enc_image(global_enc_images, offset)
         bboxes_list = bboxes
 
         output = super().forward(
             images=global_enc_images, attention_mask=attention_masks, input_ids=input_ids, labels=labels,
             output_hidden_states=True, bboxes=bboxes_list, )
+        expanded_labels = output.get("expanded_labels", labels)
+        if self.per_sample_text_loss_normalization:
+            output.loss = per_sample_causal_text_loss(output.logits, expanded_labels)
         output_hidden_states = output.hidden_states
         return output, output_hidden_states
 
@@ -307,26 +474,36 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
             global_enc_image_list.append(global_enc_image_i)
         return torch.cat(global_enc_image_list, dim=0)
 
-    def _process_hidden_states(self, output_hidden_states, seg_token_mask, offset, infer=False):
-        hidden_states = [self.model.text_hidden_fcs[0](self._get_last_hidden_state(output_hidden_states))]
-        last_hidden_state = torch.stack(hidden_states, dim=-1).sum(dim=-1)
-        pred_embeddings = last_hidden_state[seg_token_mask]
-        seg_token_counts = seg_token_mask.int().sum(-1)
+    def _extract_projected_seg_predictor_hidden(self, output_hidden_states, input_ids, offset=None,
+                                                min_token_index=0):
+        """Return projected causal predictor states, grouped per image."""
+        last_hidden_state = self._get_last_hidden_state(output_hidden_states)
+        per_conversation, positions = extract_seg_predictor_hidden(
+            last_hidden_state,
+            input_ids,
+            self.seg_token_idx,
+            min_token_index=min_token_index,
+        )
+        projected = [self.model.text_hidden_fcs[0](states) for states in per_conversation]
+        if offset is None:
+            return projected, positions
 
-        seg_token_offset = seg_token_counts.cumsum(-1)
-        seg_token_offset = torch.cat([torch.zeros(1).long().cuda(), seg_token_offset], dim=0)
-        if not infer:
-            seg_token_offset = seg_token_offset[offset]
-
-        pred_embeddings_list = []
-        for i in range(len(seg_token_offset) - 1):
-            start_i, end_i = seg_token_offset[i], seg_token_offset[i + 1]
-            pred_embeddings_list.append(pred_embeddings[start_i:end_i])
-        return hidden_states, pred_embeddings_list
+        grouped = []
+        for start, end in zip(offset[:-1].tolist(), offset[1:].tolist()):
+            values = projected[start:end]
+            grouped.append(
+                torch.cat(values, dim=0)
+                if values else last_hidden_state.new_empty((0, self.config.out_dim))
+            )
+        return grouped, positions
 
     def _generate_and_postprocess_masks(self, pred_embeddings, image_embeddings, resize_list, label_list, infer=False):
         pred_masks = []
         for i, pred_embedding in enumerate(pred_embeddings):
+            orig_size = label_list[i] if infer else label_list[i].shape
+            if pred_embedding.numel() == 0:
+                pred_masks.append(pred_embedding.new_empty((0, *tuple(orig_size))))
+                continue
             sparse_embeddings, dense_embeddings = self.model.grounding_encoder.prompt_encoder(
                 points=None, boxes=None, masks=None, text_embeds=pred_embedding.unsqueeze(1)
             )
@@ -336,43 +513,72 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
                 image_pe=self.model.grounding_encoder.prompt_encoder.get_dense_pe(),
                 sparse_prompt_embeddings=sparse_embeddings, dense_prompt_embeddings=dense_embeddings,
                 multimask_output=False, )
-            orig_size = label_list[i].shape if not infer else label_list[i]
             # During inference, we have original size list in place of label list
             pred_mask = self.model.grounding_encoder.postprocess_masks(
                 low_res_masks, input_size=resize_list[i], original_size=orig_size, )
             pred_masks.append(pred_mask[:, 0])
         return pred_masks
 
-    def _calculate_losses(self, pred_masks, masks_list, output):
-        loss_components = self._compute_loss_components(pred_masks, masks_list, output)
+    def _calculate_losses(self, pred_masks, masks_list, output, seg_valid=None):
+        loss_components = self._compute_loss_components(pred_masks, masks_list, output, seg_valid)
         return loss_components
 
-    def _compute_loss_components(self, pred_masks, masks_list, output):
+    def _compute_loss_components(self, pred_masks, masks_list, output, seg_valid=None):
         # Initialize loss components
         ce_loss = output.loss * self.ce_loss_weight
         mask_bce_loss = torch.tensor(0.0, device=ce_loss.device)
         mask_dice_loss = torch.tensor(0.0, device=ce_loss.device)
         num_masks = 0
+        batch_size = len(masks_list) if masks_list is not None else (len(pred_masks) if pred_masks else 0)
+        if seg_valid is None:
+            seg_valid = torch.tensor(
+                [mask is not None for mask in (masks_list or [])], dtype=torch.bool, device=ce_loss.device
+            )
+        else:
+            seg_valid = torch.as_tensor(seg_valid, dtype=torch.bool, device=ce_loss.device).reshape(-1)
+        if seg_valid.numel() != batch_size:
+            raise ValueError(f"seg_valid has {seg_valid.numel()} entries for batch size {batch_size}")
+        missing_pred_count = 0
+        count_mismatch_count = 0
+        unexpected_pred_count = 0
 
-        if pred_masks:
-            # Iterate over batch and compute mask-related losses
-            for batch_idx, pred_mask in enumerate(pred_masks):
-                if pred_mask.numel() > 0:  # Ensure pred_mask is not empty
-                    gt_mask = masks_list[batch_idx]
-                    # Resize gt_mask to match pred_mask if needed
-                    if gt_mask.shape[0] != pred_mask.shape[0]:
-                        gt_mask = gt_mask[:pred_mask.shape[0]]
+        pred_masks = pred_masks or [None] * batch_size
+        masks_list = masks_list or [None] * batch_size
+        if len(pred_masks) != batch_size or len(masks_list) != batch_size:
+            raise ValueError(
+                f"Segmentation batch length mismatch: pred={len(pred_masks)} gt={len(masks_list)} batch={batch_size}"
+            )
+        for batch_idx, (pred_mask, gt_mask, is_valid) in enumerate(zip(pred_masks, masks_list, seg_valid.tolist())):
+            pred_count = 0 if pred_mask is None else pred_mask.shape[0]
+            if not is_valid:
+                unexpected_pred_count += int(pred_count > 0)
+                continue
+            if gt_mask is None or gt_mask.numel() == 0:
+                raise ValueError(f"seg_valid=True sample {batch_idx} has no ground-truth mask")
+            if pred_count == 0:
+                missing_pred_count += 1
+                continue
+            if pred_count != gt_mask.shape[0]:
+                count_mismatch_count += 1
+                continue
+            mask_bce_loss += (
+                compute_sigmoid_cross_entropy(pred_mask, gt_mask, mask_count=gt_mask.shape[0])
+                * gt_mask.shape[0]
+            )
+            mask_dice_loss += (
+                calculate_dice_loss(pred_mask, gt_mask, mask_count=gt_mask.shape[0])
+                * gt_mask.shape[0]
+            )
+            num_masks += gt_mask.shape[0]
 
-                    assert gt_mask.shape[0] == pred_mask.shape[
-                        0], f"Shape mismatch: gt_mask {gt_mask.shape}, pred_mask {pred_mask.shape}"
-
-                    # Compute Binary Cross-Entropy Loss
-                    mask_bce_loss += (compute_sigmoid_cross_entropy(pred_mask, gt_mask, mask_count=gt_mask.shape[0]) *
-                                      gt_mask.shape[0])
-                    # Compute Dice Loss
-                    mask_dice_loss += (
-                            calculate_dice_loss(pred_mask, gt_mask, mask_count=gt_mask.shape[0]) * gt_mask.shape[0])
-                    num_masks += gt_mask.shape[0]
+        if missing_pred_count or count_mismatch_count:
+            self.seg_missing_pred_total.add_(missing_pred_count)
+            self.seg_count_mismatch_total.add_(count_mismatch_count)
+            warnings.warn(
+                "Fake segmentation supervision was skipped because required [SEG]/pred masks were missing "
+                f"or mismatched: missing={missing_pred_count}, count_mismatch={count_mismatch_count}",
+                RuntimeWarning,
+            )
 
         # Normalize the losses
         mask_bce_loss = self.bce_loss_weight * mask_bce_loss / (num_masks + 1e-8)
@@ -382,40 +588,84 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
         # Aggregate all loss components
         total_loss = ce_loss + mask_loss
         return {"loss": total_loss, "ce_loss": ce_loss, "mask_bce_loss": mask_bce_loss,
-                "mask_dice_loss": mask_dice_loss, "mask_loss": mask_loss, }
+                "mask_dice_loss": mask_dice_loss, "mask_loss": mask_loss,
+                "seg_missing_pred_count": torch.tensor(missing_pred_count, device=ce_loss.device),
+                "seg_count_mismatch_count": torch.tensor(count_mismatch_count, device=ce_loss.device),
+                "seg_unexpected_pred_count": torch.tensor(unexpected_pred_count, device=ce_loss.device), }
 
     def evaluate(self, global_enc_images, grounding_enc_images, input_ids, resize_list, orig_sizes, max_tokens_new=32,
-                 bboxes=None, force_cls_token=True):
+                 bboxes=None, force_cls_token=True, return_generation_details=False):
         with torch.no_grad():
             generation_kwargs = {}
-            if force_cls_token and self.cls_token_idx is not None:
+            if self.token_strategy == "fixed_cls_query":
+                if self.cls_token_idx is None or not input_ids.eq(self.cls_token_idx).any(dim=1).all():
+                    raise ValueError("fixed_cls_query generation requires [CLS] in every input prompt")
+            elif force_cls_token and self.cls_token_idx is not None:
                 generation_kwargs["forced_decoder_ids"] = [[input_ids.shape[1], self.cls_token_idx]]
             generation_outputs = self.generate(
                 images=global_enc_images, input_ids=input_ids, bboxes=bboxes, max_new_tokens=max(2, max_tokens_new),
-                num_beams=1, output_hidden_states=True, return_dict_in_generate=True, **generation_kwargs)
+                num_beams=1, output_hidden_states=False, return_dict_in_generate=True,
+                output_scores=return_generation_details, use_cache=True, **generation_kwargs)
 
-            output_hidden_states = generation_outputs.hidden_states
             generated_output_ids = generation_outputs.sequences
+            generated_attention = generated_output_ids.ne(self.config.pad_token_id)
+            full_output = super().forward(
+                images=global_enc_images,
+                attention_mask=generated_attention,
+                input_ids=generated_output_ids,
+                output_hidden_states=True,
+                bboxes=bboxes,
+            )
+            output_hidden_states = full_output.hidden_states
 
-            last_hidden_state = self._get_last_hidden_state(output_hidden_states)
-            seg_token_mask = self._create_expanded_token_mask(
-                generated_output_ids, self.seg_token_idx, target_length=last_hidden_state.shape[1],
-                select_preceding=True)
-            # Process hidden states
-            hidden_states, predicted_embeddings = self._process_hidden_states(
-                output_hidden_states, seg_token_mask, None, infer=True
+            predicted_embeddings, _ = self._extract_projected_seg_predictor_hidden(
+                output_hidden_states, generated_output_ids
             )
             cls_logits, cls_valid_mask = self._extract_cls_logits(
-                output_hidden_states, generated_output_ids, min_token_index=input_ids.shape[1])
+                output_hidden_states,
+                generated_output_ids,
+                min_token_index=0 if self.token_strategy == "fixed_cls_query" else input_ids.shape[1],
+            )
+            lm_verdict_logits, lm_verdict_valid = self._extract_lm_verdict_logits(
+                full_output.logits,
+                generated_output_ids,
+                min_token_index=0 if self.token_strategy == "fixed_cls_query" else input_ids.shape[1],
+            )
             cls_results = {
                 "logits": cls_logits,
                 "probabilities": cls_logits.float().softmax(dim=-1),
                 "predictions": cls_logits.argmax(dim=-1),
                 "valid_mask": cls_valid_mask,
+                "lm_verdict_logits": lm_verdict_logits,
+                "lm_verdict_probabilities": lm_verdict_logits.float().softmax(dim=-1),
+                "lm_verdict_predictions": lm_verdict_logits.argmax(dim=-1),
+                "lm_verdict_valid_mask": lm_verdict_valid,
+                "cls_lm_agree": cls_logits.argmax(dim=-1).eq(lm_verdict_logits.argmax(dim=-1))
+                & cls_valid_mask & lm_verdict_valid,
+                "cls_pred": cls_logits.argmax(dim=-1),
+                "cls_prob": cls_logits.float().softmax(dim=-1)[:, 1],
+                "lm_verdict_pred": lm_verdict_logits.argmax(dim=-1),
+                "lm_verdict_prob": lm_verdict_logits.float().softmax(dim=-1)[:, 1],
             }
-            image_embeddings = self.get_grounding_encoder_embs(grounding_enc_images)
-            # Generate and post-process masks
-            pred_masks = self._generate_and_postprocess_masks(
-                predicted_embeddings, image_embeddings, resize_list, orig_sizes, infer=True
-            )
+            if grounding_enc_images is None:
+                pred_masks = []
+            elif not any(embedding.numel() for embedding in predicted_embeddings):
+                last_hidden_state = self._get_last_hidden_state(output_hidden_states)
+                pred_masks = [
+                    last_hidden_state.new_empty((0, *tuple(original_size)))
+                    for original_size in orig_sizes
+                ]
+            else:
+                image_embeddings = self.get_grounding_encoder_embs(grounding_enc_images)
+                # Generate and post-process masks
+                pred_masks = self._generate_and_postprocess_masks(
+                    predicted_embeddings, image_embeddings, resize_list, orig_sizes, infer=True
+                )
+        if return_generation_details:
+            generation_details = {
+                "scores": tuple(generation_outputs.scores),
+                "prompt_length": int(input_ids.shape[1]),
+                "max_new_tokens": int(max_tokens_new),
+            }
+            return generated_output_ids, pred_masks, cls_results, generation_details
         return generated_output_ids, pred_masks, cls_results

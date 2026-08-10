@@ -17,6 +17,8 @@ DEFAULT_IM_START_TOKEN = "<im_start>"
 DEFAULT_IM_END_TOKEN = "<im_end>"
 DEFAULT_BBOX_TOKEN = "<bbox>"
 DEFAULT_CLS_TOKEN = "[CLS]"
+DEFAULT_REAL_TOKEN = "[REAL]"
+DEFAULT_FAKE_TOKEN = "[FAKE]"
 
 
 class Summary(Enum):

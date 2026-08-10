@@ -1,0 +1,60 @@
+baseline: unified_glamm_fixed_cls
+seed: 3407
+
+model:
+  version: checkpoints/GLaMM-FullScope
+  token_strategy: fixed_cls_query
+  precision: bf16
+  model_max_length: 1536
+  image_size: 1024
+  out_dim: 256
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  lora_target_modules: q_proj,v_proj
+  train_mask_decoder: true
+
+data:
+  training_strategy: unified
+  manifest_dir: outputs/data_audits/unified_forensics_split_v1
+  frozen_split: true
+  batch_size_per_device: 2
+  gradient_accumulation_steps: 10
+  steps_per_epoch: 500
+  epochs: 10
+
+loss:
+  text_weight: 1.0
+  classification_weight: 1.0
+  mask_bce_weight: 2.0
+  mask_dice_weight: 0.5
+  consistency_loss_weight: 0.0
+
+optimizer:
+  name: AdamW
+  learning_rate: 0.0003
+  betas: [0.9, 0.95]
+  weight_decay: 0.0
+  gradient_clip_norm: 1.0
+
+scheduler:
+  name: WarmupDecayLR
+  warmup_steps: 100
+  warmup_min_lr: 0.0
+  warmup_max_lr: 0.0003
+  warmup_type: linear
+
+features:
+  use_npr: false
+  use_srm: false
+  forensic_fusion: none
+  artifact_type_head: false
+  extra_evidence_query: false
+  known_fake_auxiliary_training: false
+  prompt_diversity_ablation: false
+
+checkpoint_selection:
+  status: awaiting_human_decision
+  use_loki: false
+  save_last: true
+  save_best: true

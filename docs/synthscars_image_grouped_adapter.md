@@ -91,7 +91,7 @@ train 298 个、test 28 个 polygon 的最大坐标比图片宽或高多约 `2.8
 
 因此不能随意保留其中一条，也不应把编码/尺寸变体当成独立训练图片。当前处理为：以无后缀 stem 作为视觉身份；选择像素数最大的变体作为 canonical 图像，同尺寸时优先 PNG；将其他变体的 polygon 按宽高比例缩放到 canonical 坐标；聚合 annotation IDs、captions 和 refs 后生成单个 union mask。原始文件名、原始 polygon、来源尺寸和 annotation ID 均保留。
 
-官方 test split 始终保持独立，不参与训练或重复合并。
+官方 test split 始终保持独立，不参与训练或重复合并。后续跨 split pHash 审计发现原始 train/test 有 18 个同 UUID 视觉身份重合；冻结 v1 保留官方 test 原样，并仅从生成的内部 split manifest 排除对应 18 个 train 样本。详情见 `docs/unified_forensics_data_freeze_v1.md`。
 
 ## 6. 验证
 

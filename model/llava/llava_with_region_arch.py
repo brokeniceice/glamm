@@ -91,10 +91,13 @@ class LlavaMetaForCausalLM(ABC):
                 and images is not None
                 and input_ids.shape[1] == 1
             ):
+                cache_tensors = [value for value in past_key_values[-1] if torch.is_tensor(value)]
+                if not cache_tensors:
+                    raise ValueError("Generation cache layer contains no key/value tensor")
                 attention_mask = torch.ones(
-                    (attention_mask.shape[0], past_key_values[-1][-1].shape[-2] + 1),
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device,
+                    (input_ids.shape[0], cache_tensors[-1].shape[-2] + 1),
+                    dtype=attention_mask.dtype if attention_mask is not None else torch.long,
+                    device=input_ids.device,
                 )
             return input_ids, attention_mask, past_key_values, None, labels
 

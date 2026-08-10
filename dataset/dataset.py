@@ -135,38 +135,118 @@ class HybridSegDataset(HybridDatasetBase):
         )
 
 
-def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=False, local_rank=-1):
+def _stack_optional_tensors(values, field_name):
+    """Stack an all-present field without letting batch order define semantics."""
+    present = [value is not None for value in values]
+    if not any(present):
+        return None
+    if not all(present):
+        raise ValueError(
+            f"Mixed presence for {field_name}: each sample must explicitly provide the same tensor field"
+        )
+    return torch.stack(values, dim=0)
+
+
+def _truncate_training_batch_preserving_seg(input_ids, targets, attention_masks, tokenizer, truncate_len):
+    """Truncate long training rows without ever dropping an existing [SEG]."""
+    seg_ids = tokenizer("[SEG]", add_special_tokens=False).input_ids
+    if len(seg_ids) != 1:
+        raise ValueError("[SEG] must encode as exactly one token")
+    seg_id = seg_ids[0]
+    kept_ids, kept_targets = [], []
+    preserve_count = 0
+    for ids, labels, attention in zip(input_ids, targets, attention_masks):
+        valid_len = int(attention.sum().item())
+        ids, labels = ids[:valid_len], labels[:valid_len]
+        if valid_len > truncate_len:
+            seg_positions = ids.eq(seg_id).nonzero(as_tuple=False).flatten()
+            if seg_positions.numel() and int(seg_positions[-1]) >= truncate_len:
+                tail_start = int(seg_positions[-1])
+                tail_len = valid_len - tail_start
+                prefix_budget = truncate_len - tail_len
+                if prefix_budget <= 0:
+                    raise ValueError("Training sequence suffix beginning at [SEG] exceeds truncation budget")
+                ids = torch.cat([ids[:prefix_budget], ids[tail_start:]], dim=0)
+                labels = torch.cat([labels[:prefix_budget], labels[tail_start:]], dim=0)
+                preserve_count += 1
+            else:
+                ids, labels = ids[:truncate_len], labels[:truncate_len]
+        kept_ids.append(ids)
+        kept_targets.append(labels)
+    padded_ids = torch.nn.utils.rnn.pad_sequence(
+        kept_ids, batch_first=True, padding_value=tokenizer.pad_token_id
+    )
+    padded_targets = torch.nn.utils.rnn.pad_sequence(
+        kept_targets, batch_first=True, padding_value=IGNORE_INDEX
+    )
+    return padded_ids, padded_targets, padded_ids.ne(tokenizer.pad_token_id), preserve_count
+
+
+def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=False, local_rank=-1,
+                      token_strategy="generated_cls"):
     # Initializing lists and counters
     image_path_list, global_enc_image_list, grounding_enc_image_list = [], [], []
     bboxes_list, conversation_list, masks_list = [], [], []
     label_list, resize_list, questions_list = [], [], []
-    selected_labels_list, cls_labels_list, offset_list, inferences = [], [], [0], []
+    selected_labels_list, cls_labels_list, seg_valid_list, offset_list = [], [], [], [0]
+    sample_ids, sources, content_categories = [], [], []
+    prompt_template_ids, prompt_sha256s = [], []
     cnt = 0
 
     # Iterating through the batch
     for sample in batch:
-        if len(sample) == 10:
+        if isinstance(sample, dict):
+            image_path = sample["image_path"]
+            global_enc_image = sample["global_enc_image"]
+            grounding_enc_image = sample.get("grounding_enc_image")
+            bboxes = sample.get("bboxes")
+            conversations = sample["conversations"]
+            masks = sample.get("masks")
+            label = sample.get("label")
+            resize = sample.get("resize")
+            questions = sample.get("questions", [])
+            sampled_classes = sample.get("sampled_classes", [])
+            cls_label = sample.get("cls_label")
+            seg_valid = bool(sample.get("seg_valid", False))
+            sample_ids.append(sample.get("sample_id"))
+            sources.append(sample.get("source"))
+            content_categories.append(sample.get("content_category"))
+            prompt_template_ids.append(sample.get("prompt_template_id"))
+            prompt_sha256s.append(sample.get("prompt_sha256"))
+        elif len(sample) == 10:
             (image_path, global_enc_image, grounding_enc_image, bboxes, conversations, masks, label, resize,
              questions, sampled_classes) = sample
             cls_label = None
+            seg_valid = masks is not None
+            sample_ids.append(None)
+            sources.append(None)
+            content_categories.append(None)
+            prompt_template_ids.append(None)
+            prompt_sha256s.append(None)
         elif len(sample) == 11:
             (image_path, global_enc_image, grounding_enc_image, bboxes, conversations, masks, label, resize,
              questions, sampled_classes, cls_label) = sample
+            seg_valid = masks is not None
+            sample_ids.append(None)
+            sources.append(None)
+            content_categories.append(None)
+            prompt_template_ids.append(None)
+            prompt_sha256s.append(None)
         else:
-            raise ValueError(f"Expected a 10- or 11-field dataset sample, got {len(sample)} fields")
+            raise ValueError(f"Expected a mapping or 10-/11-field dataset sample, got {len(sample)} fields")
         image_path_list.append(image_path)
         global_enc_image_list.append(global_enc_image)
         grounding_enc_image_list.append(grounding_enc_image)
         bboxes_list.append(bboxes)
         conversation_list.extend(conversations)
-        masks_list.append([] if masks is None else masks.float())
+        masks_list.append(None if masks is None else masks.float())
         label_list.append(label)
         resize_list.append(resize)
         questions_list.append(questions)
         selected_labels_list.append(sampled_classes)
         cls_labels_list.append(cls_label)
+        seg_valid_list.append(seg_valid)
         offset_list.append(cnt := cnt + len(conversations))
-        inferences.append(inference)
 
     # Handling the conversation list
     if use_mm_start_end:
@@ -174,10 +254,19 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
         conversation_list = [conv.replace(DEFAULT_IMAGE_TOKEN, replace_token) for conv in conversation_list]
 
     conv = conversation_lib.default_conversation.copy()
-    if not inference:
+    if token_strategy not in {"generated_cls", "fixed_cls_query"}:
+        raise ValueError(f"Unsupported token strategy: {token_strategy}")
+    if not inference or token_strategy == "fixed_cls_query":
         assistant_prefix = conv.sep + conv.roles[1] + ": "
         cls_prefix = assistant_prefix + DEFAULT_CLS_TOKEN + " "
-        conversation_list = [conversation.replace(assistant_prefix, cls_prefix) for conversation in conversation_list]
+        assistant_bare = conv.sep + conv.roles[1] + ":"
+        updated_conversations = []
+        for conversation in conversation_list:
+            conversation = conversation.replace(assistant_prefix, cls_prefix)
+            if token_strategy == "fixed_cls_query" and conversation.endswith(assistant_bare):
+                conversation += " " + DEFAULT_CLS_TOKEN
+            updated_conversations.append(conversation)
+        conversation_list = updated_conversations
 
     # Tokenizing and padding input ids
     input_ids = torch.nn.utils.rnn.pad_sequence(
@@ -192,35 +281,63 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
     sep = conv.sep + conv.roles[1] + ": "
     sep2 = conv.sep2
 
-    for conversation, target in zip(conversation_list, targets):
-        _process_conversation(conversation, target, tokenizer, sep, sep2)
+    if inference:
+        # Prompt-only and partial-assistant evaluation sequences are not
+        # complete training conversations.  Labels are unused by causal
+        # inference, so do not force them through the training-round parser.
+        targets.fill_(IGNORE_INDEX)
+    else:
+        for conversation, target in zip(conversation_list, targets):
+            _process_conversation(conversation, target, tokenizer, sep, sep2)
+    if token_strategy == "fixed_cls_query":
+        cls_token_ids = tokenizer(DEFAULT_CLS_TOKEN, add_special_tokens=False).input_ids
+        if len(cls_token_ids) != 1:
+            raise ValueError(f"{DEFAULT_CLS_TOKEN} must encode as exactly one token")
+        cls_mask = input_ids.eq(cls_token_ids[0])
+        if not cls_mask.any(dim=1).all():
+            raise ValueError("fixed_cls_query requires one [CLS] token in every conversation")
+        targets[cls_mask] = IGNORE_INDEX
 
     # Adjusting for inferences
-    if not inferences[0]:
-        truncate_len = tokenizer.model_max_length - 575
+    seg_preserving_truncation_count = 0
+    if not inference:
+        truncate_len = (
+            tokenizer.model_max_length - 575
+            if tokenizer.model_max_length > 575 else tokenizer.model_max_length
+        )
         if input_ids.shape[1] > truncate_len:
-            input_ids, targets, attention_masks = map(
-                lambda x: x[:, :truncate_len], [input_ids, targets, attention_masks]
+            input_ids, targets, attention_masks, seg_preserving_truncation_count = (
+                _truncate_training_batch_preserving_seg(
+                    input_ids, targets, attention_masks, tokenizer, truncate_len
                 )
+            )
 
     return {
         "image_paths": image_path_list,
         "global_enc_images": torch.stack(global_enc_image_list, dim=0),
-        "grounding_enc_images": None if grounding_enc_image_list[0] is None else torch.stack(grounding_enc_image_list, dim=0),
-        "bboxes": None if bboxes_list[0] is None else bboxes_list,
+        "grounding_enc_images": _stack_optional_tensors(grounding_enc_image_list, "grounding_enc_images"),
+        "bboxes": None if not any(box is not None for box in bboxes_list) else bboxes_list,
         "input_ids": input_ids,
         "labels": targets,
         "attention_masks": attention_masks,
-        "masks_list": None if masks_list[0] is None else masks_list,
-        "label_list": None if label_list[0] is None else label_list,
-        "resize_list": None if resize_list[0] is None else resize_list,
+        "masks_list": masks_list,
+        "label_list": label_list,
+        "resize_list": resize_list,
         "offset": torch.LongTensor(offset_list),
         "questions_list": questions_list,
         "sampled_classes_list": selected_labels_list,
         "cls_labels": None if all(label is None for label in cls_labels_list) else torch.tensor(
             [-100 if label is None else int(label) for label in cls_labels_list], dtype=torch.long),
-        "inference": inferences[0],
+        "seg_valid": torch.tensor(seg_valid_list, dtype=torch.bool),
+        "inference": inference,
         "conversation_list": conversation_list,
+        "sample_ids": sample_ids,
+        "sources": sources,
+        "content_categories": content_categories,
+        "prompt_template_ids": prompt_template_ids,
+        "prompt_sha256s": prompt_sha256s,
+        "token_strategy": token_strategy,
+        "seg_preserving_truncation_count": seg_preserving_truncation_count,
     }
 
 

@@ -1,0 +1,8 @@
+{
+  "schema_version": "gpt_content_labels_v1",
+  "default_model": "gpt-5.6-luna",
+  "categories": ["human", "animal", "object", "scene", "ambiguous"],
+  "image_detail": "low",
+  "reasoning_effort": "low",
+  "prompt": "Classify the dominant semantic content of the image for dataset balancing. Do not judge whether the image is real or synthetic, and do not classify visual artifacts. Return exactly one label. Use human when one or more people or human figures clearly dominate the composition. Use animal when one or more animals clearly dominate. Use object when a physical object, vehicle, food, tool, machine, or product clearly dominates. Use scene when the environment, landscape, street, building, room, or broad setting clearly dominates. Use ambiguous only when no single category clearly dominates, when two categories are genuinely co-dominant, or when the main subject is an inseparable cross-category hybrid such as a human body with an animal head. The mere presence of a secondary person or animal does not make an image ambiguous. Base the decision on visual prominence, occupied area, centrality, and semantic emphasis. Confidence is a number from 0 to 1. Give one short factual reason describing the dominant subject(s)."
+}
