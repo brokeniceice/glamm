@@ -210,6 +210,18 @@ class ForensicsEvaluationProtocolTest(unittest.TestCase):
         self.assertEqual(records[0]["image_iou"], 0.0)
         self.assertEqual(metrics["seg_trigger_failure_count"], 1)
 
+    def test_localization_prediction_preserves_explanation_audit_fields(self):
+        item = sample()
+        item["manifest_row"] = {"explanation": "  GT   artifact evidence  "}
+        result = output(pred_mask=self.perfect_logits())
+        result["repetition_statistics"] = {"is_repetition_loop": True}
+        records, _ = evaluate_gt_fake_generation_localization(
+            [item], RecordingBackend(result)
+        )
+        self.assertEqual(records[0]["gt_explanation"], "GT artifact evidence")
+        self.assertEqual(records[0]["generated_explanation"], "model generated evidence")
+        self.assertTrue(records[0]["repetition_flag"])
+
     def test_missing_seg_in_joint_is_zero_and_grounding_failure(self):
         backend = RecordingBackend(output(cls_pred=1, pred_mask=None, triggered=False))
         records, metrics = evaluate_joint_localization([sample()], backend)

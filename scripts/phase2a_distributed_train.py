@@ -58,7 +58,9 @@ OUTPUT_ROOT = REPO_ROOT / "outputs/phase2a_unified_baseline"
 def parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/phase2a_unified_baseline_full.yaml")
-    parser.add_argument("--mode", choices=("smoke", "train", "resume-check"), required=True)
+    parser.add_argument(
+        "--mode", choices=("smoke", "train", "resume-check", "init-audit"), required=True
+    )
     parser.add_argument("--optimizer-steps", type=int, default=None)
     parser.add_argument("--micro-batch-size", type=int, default=None)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=None)
@@ -66,6 +68,7 @@ def parse_args(argv=None):
     parser.add_argument("--output-subdir", default=None)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--checkpoint-root", default=None)
+    parser.add_argument("--runtime-output-root", default=None)
     parser.add_argument("--profile-timing", action="store_true")
     parser.add_argument("--disable-gradient-checkpointing", action="store_true")
     parser.add_argument("--save-smoke-checkpoint", action="store_true")
@@ -205,6 +208,50 @@ def selected_parameter_views(model, tokenizer):
             "row_ids": token_ids if group in {"embeddings", "lm_head"} else None,
         }
     return output
+
+
+def deterministic_tensor_collection_hash(named_tensors):
+    """Hash names, metadata and exact tensor bytes without materializing a full copy."""
+    digest = hashlib.sha256()
+    count = elements = bytes_hashed = 0
+    for name, tensor in sorted(named_tensors, key=lambda item: item[0]):
+        value = tensor.detach().contiguous()
+        header = json.dumps(
+            {"name": name, "dtype": str(value.dtype), "shape": list(value.shape)},
+            sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+        raw = value.view(torch.uint8).cpu().numpy().tobytes()
+        digest.update(len(header).to_bytes(8, "little")); digest.update(header)
+        digest.update(len(raw).to_bytes(8, "little")); digest.update(raw)
+        count += 1; elements += value.numel(); bytes_hashed += len(raw)
+    return {
+        "sha256": digest.hexdigest(), "tensor_count": count,
+        "element_count": elements, "tensor_bytes": bytes_hashed,
+    }
+
+
+def initialization_audit(model, tokenizer, config, rank):
+    if rank != 0:
+        return None
+    full = deterministic_tensor_collection_hash(model.state_dict().items())
+    trainable = deterministic_tensor_collection_hash(
+        (name, value) for name, value in model.named_parameters() if value.requires_grad
+    )
+    groups = {}
+    for group, item in selected_parameter_views(model, tokenizer).items():
+        groups[group] = {
+            "parameter_name": item["name"],
+            "sha256": hashlib.sha256(
+                item["values"].contiguous().view(torch.uint8).numpy().tobytes()
+            ).hexdigest(),
+            "special_token_row_ids": item["row_ids"],
+        }
+    return {
+        "seed": int(config["experiment"]["seed"]),
+        "base_checkpoint": str(config["model"]["version"]),
+        "target_protocol": config["forensics"].get("target_protocol", "historical"),
+        "full_state": full, "trainable_state": trainable, "selected_groups": groups,
+    }
 
 
 def parameter_delta_and_sync(model, initial, rank, world_size):
@@ -348,9 +395,15 @@ def main(argv=None):
             f"Effective global batch changed: {micro_batch}*{world_size}*{gas}"
         )
     cli.gradient_accumulation_steps = gas
-    output_dir = OUTPUT_ROOT / (cli.output_subdir or ("preflight/dual" if world_size == 2 else "preflight/single"))
+    configured_output_root = Path(
+        cli.runtime_output_root or config["experiment"].get("runtime_output_dir", OUTPUT_ROOT)
+    )
+    if not configured_output_root.is_absolute():
+        configured_output_root = REPO_ROOT / configured_output_root
+    configured_output_root = configured_output_root.resolve()
+    output_dir = configured_output_root / (cli.output_subdir or ("preflight/dual" if world_size == 2 else "preflight/single"))
     if cli.mode == "train":
-        output_dir = OUTPUT_ROOT
+        output_dir = configured_output_root
     configured_checkpoint_root = cli.checkpoint_root or config["checkpoint"]["output_root"]
     checkpoint_root = Path(configured_checkpoint_root)
     if not checkpoint_root.is_absolute():
@@ -376,6 +429,16 @@ def main(argv=None):
     if cli.disable_gradient_checkpointing:
         model.gradient_checkpointing_disable()
     model.to(device=device, dtype=torch.bfloat16)
+    if cli.mode == "init-audit":
+        audit = initialization_audit(model, tokenizer, config, rank)
+        rank0_write_json(output_dir / "initialization_hash.json", audit, rank)
+        torch.distributed.barrier()
+        return
+    init_hash_path = output_dir / "initialization_hash.json"
+    audit = initialization_audit(model, tokenizer, config, rank) if not init_hash_path.exists() else None
+    if audit is not None:
+        rank0_write_json(init_hash_path, audit, rank)
+    torch.distributed.barrier()
     groups = glamm_train.build_optimizer_parameter_groups(model, args)
     total_budget = int(config["training"]["total_optimizer_steps"])
     torch_optimizer = torch.optim.AdamW(
@@ -387,15 +450,18 @@ def main(argv=None):
     )
     initial_parameters = selected_parameter_views(engine.module, tokenizer)
 
+    target_protocol = config["forensics"].get("target_protocol", "historical")
     train_dataset = UnifiedForensicsDataset(
         REPO_ROOT / config["data"]["manifest_dir"], tokenizer, args.vision_tower, split="train",
         datasets_root=config["data"]["datasets_root"],
         synthscars_root=config["data"]["synthscars_root"], image_size=args.image_size,
+        target_protocol=target_protocol,
     )
     val_dataset = UnifiedForensicsDataset(
         REPO_ROOT / config["data"]["manifest_dir"], tokenizer, args.vision_tower, split="val",
         datasets_root=config["data"]["datasets_root"],
         synthscars_root=config["data"]["synthscars_root"], image_size=args.image_size,
+        target_protocol=target_protocol,
     )
     train_sampler = (
         FixedIndexSampler(worst_case_rank_indices(

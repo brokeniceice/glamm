@@ -1,0 +1,36 @@
+experiment:
+  name: phase2c_B1_npr
+  seed: 3407
+  output_dir: outputs/phase2c_forensic_fusion/B1_npr
+base_checkpoint:
+  path: checkpoints/phase2a_unified_baseline/single/best/checkpoint/mp_rank_00_model_states.pt
+  phase2a_best_step: 2500
+  phase2a_best_epoch: 5
+freeze_phase2a: true
+forensics:
+  variant: npr
+  classification_only: true
+  expert_checkpoint: checkpoints_stage1/official_npr_srm_20260802_062826/best.pth
+  expert_frozen: true
+  d_fuse: 256
+generation_path_modified: false
+localization_path_modified: false
+data:
+  manifest_dir: outputs/data_audits/unified_forensics_split_v1
+  datasets_root: datasets
+  synthscars_root: datasets/SynthScars
+  frozen_split: true
+training:
+  max_optimizer_steps: 1500
+  validation_interval: 250
+  effective_global_batch: 20
+  optimizer: AdamW
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  selector: min_val_cls_loss
+  prohibited_selection_splits: [test, loki, raise, synthscars_official]
+preprocessing:
+  load_size: 256
+  crop_size: 224
+  crop: center
+  normalization: imagenet

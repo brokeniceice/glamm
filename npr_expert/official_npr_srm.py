@@ -212,15 +212,8 @@ class OfficialNPRSRM(nn.Module):
     def forward(self, images, focal_images=None):
         features = None
         if not self.focal_only:
-            source_images = images
-            npr_images = images - self.interpolate(images, 0.5)
-            features = self.maxpool(self.relu(self.bn1(self.conv1(npr_images * 2.0 / 3.0))))
-            features = self.layer2(self.layer1(features))
-            features = self.avgpool(features)
-
-            srm_features = self.srm_pool(self.srm_stem(self.srm_residual_features(source_images)))
-            features = features + self.srm_gate.to(dtype=features.dtype) * srm_features
-            features = features.flatten(1).float()
+            branches = self.extract_branch_features(images)
+            features = branches["npr"] + branches["srm_gated"]
         if self.uses_focal:
             if focal_images is None:
                 raise ValueError("启用 FOCAL extractor 时必须提供 focal_images")
@@ -238,6 +231,43 @@ class OfficialNPRSRM(nn.Module):
                 else features + self.focal_gate * focal_features
             )
         return self.fc1(features)
+
+    def extract_branch_features(self, images):
+        """Return the trained NPR and SRM image-level representations.
+
+        This is a read-only decomposition of the existing expert graph.  It is
+        used by Phase 2C to ablate the two signals without inventing new NPR or
+        SRM algorithms.  ``srm_gated`` is the exact residual contribution used
+        by the historical joint expert; ``srm_raw`` is retained for provenance
+        and diagnostics.
+        """
+        if self.focal_only:
+            raise ValueError("focal_only has no NPR/SRM branch features")
+        npr = self.extract_npr_features(images)
+        srm_raw = self.extract_srm_features(images)
+        srm_gated = self.srm_gate.float() * srm_raw
+        return {"npr": npr, "srm_raw": srm_raw, "srm_gated": srm_gated}
+
+    def extract_npr_features(self, images):
+        """Official NPR branch through layer2 and global average pooling."""
+        npr_images = images - self.interpolate(images, 0.5)
+        npr = self.maxpool(self.relu(self.bn1(self.conv1(npr_images * 2.0 / 3.0))))
+        return self.avgpool(self.layer2(self.layer1(npr))).flatten(1).float()
+
+    def extract_srm_features(self, images):
+        """Frozen Phase 2C SRM backend feature before the historical gate."""
+        return self.srm_pool(
+            self.srm_stem(self.srm_residual_features(images))
+        ).flatten(1).float()
+
+    def branch_logits(self, images):
+        """Expose standalone branch scores under the historical shared head."""
+        branches = self.extract_branch_features(images)
+        return {
+            "npr": self.fc1(branches["npr"]),
+            "srm": self.fc1(branches["srm_gated"]),
+            "npr_srm": self.fc1(branches["npr"] + branches["srm_gated"]),
+        }
 
     @classmethod
     def from_checkpoint(cls, checkpoint_path, freeze=False, **model_kwargs):

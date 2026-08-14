@@ -147,7 +147,9 @@ def _stack_optional_tensors(values, field_name):
     return torch.stack(values, dim=0)
 
 
-def _truncate_training_batch_preserving_seg(input_ids, targets, attention_masks, tokenizer, truncate_len):
+def _truncate_training_batch_preserving_seg(
+    input_ids, targets, attention_masks, tokenizer, truncate_len, target_protocols=None
+):
     """Truncate long training rows without ever dropping an existing [SEG]."""
     seg_ids = tokenizer("[SEG]", add_special_tokens=False).input_ids
     if len(seg_ids) != 1:
@@ -155,13 +157,27 @@ def _truncate_training_batch_preserving_seg(input_ids, targets, attention_masks,
     seg_id = seg_ids[0]
     kept_ids, kept_targets = [], []
     preserve_count = 0
-    for ids, labels, attention in zip(input_ids, targets, attention_masks):
+    protocols = target_protocols or [None] * len(input_ids)
+    phrase_suffix_ids = tokenizer("Target regions:", add_special_tokens=False).input_ids[1:]
+    for ids, labels, attention, protocol in zip(input_ids, targets, attention_masks, protocols):
         valid_len = int(attention.sum().item())
         ids, labels = ids[:valid_len], labels[:valid_len]
         if valid_len > truncate_len:
             seg_positions = ids.eq(seg_id).nonzero(as_tuple=False).flatten()
             if seg_positions.numel() and int(seg_positions[-1]) >= truncate_len:
                 tail_start = int(seg_positions[-1])
+                if protocol == "phrase_aligned":
+                    # Preserve the complete authoritative localization field,
+                    # not merely its terminal [SEG], when a long explanation
+                    # crosses the training context budget.
+                    before_seg = ids[:tail_start].tolist()
+                    matches = [
+                        start for start in range(len(before_seg) - len(phrase_suffix_ids) + 1)
+                        if before_seg[start:start + len(phrase_suffix_ids)] == phrase_suffix_ids
+                    ]
+                    if not matches:
+                        raise ValueError("phrase_aligned row lacks the Target regions field before [SEG]")
+                    tail_start = max(0, matches[-1] - 1)
                 tail_len = valid_len - tail_start
                 prefix_budget = truncate_len - tail_len
                 if prefix_budget <= 0:
@@ -190,7 +206,7 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
     label_list, resize_list, questions_list = [], [], []
     selected_labels_list, cls_labels_list, seg_valid_list, offset_list = [], [], [], [0]
     sample_ids, sources, content_categories = [], [], []
-    prompt_template_ids, prompt_sha256s = [], []
+    prompt_template_ids, prompt_sha256s, target_protocols = [], [], []
     cnt = 0
 
     # Iterating through the batch
@@ -213,6 +229,7 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
             content_categories.append(sample.get("content_category"))
             prompt_template_ids.append(sample.get("prompt_template_id"))
             prompt_sha256s.append(sample.get("prompt_sha256"))
+            target_protocols.append(sample.get("target_protocol"))
         elif len(sample) == 10:
             (image_path, global_enc_image, grounding_enc_image, bboxes, conversations, masks, label, resize,
              questions, sampled_classes) = sample
@@ -223,6 +240,7 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
             content_categories.append(None)
             prompt_template_ids.append(None)
             prompt_sha256s.append(None)
+            target_protocols.append(None)
         elif len(sample) == 11:
             (image_path, global_enc_image, grounding_enc_image, bboxes, conversations, masks, label, resize,
              questions, sampled_classes, cls_label) = sample
@@ -232,6 +250,7 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
             content_categories.append(None)
             prompt_template_ids.append(None)
             prompt_sha256s.append(None)
+            target_protocols.append(None)
         else:
             raise ValueError(f"Expected a mapping or 10-/11-field dataset sample, got {len(sample)} fields")
         image_path_list.append(image_path)
@@ -308,7 +327,8 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
         if input_ids.shape[1] > truncate_len:
             input_ids, targets, attention_masks, seg_preserving_truncation_count = (
                 _truncate_training_batch_preserving_seg(
-                    input_ids, targets, attention_masks, tokenizer, truncate_len
+                    input_ids, targets, attention_masks, tokenizer, truncate_len,
+                    target_protocols=target_protocols,
                 )
             )
 

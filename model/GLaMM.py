@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from typing import List
@@ -7,6 +8,12 @@ import warnings
 from model.SAM import build_sam_vit_h
 from model.llava.model.language_model.llava_llama import LlavaLlamaForCausalLM, LlavaLlamaModel
 from tools.utils import IMAGE_TOKEN_INDEX
+
+
+def _release_cuda_cache_unless_retained():
+    """Keep allocator high-water reservations for shared-GPU training when requested."""
+    if os.environ.get("GLAMM_PRESERVE_CUDA_CACHE", "0") != "1":
+        torch.cuda.empty_cache()
 
 
 def per_sample_causal_text_loss(logits: torch.Tensor, labels: torch.Tensor,
@@ -236,7 +243,7 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
             return torch.cat([self._encode_single_image(img) for img in pixel_values], dim=0)
 
     def _encode_single_image(self, image):
-        torch.cuda.empty_cache()
+        _release_cuda_cache_unless_retained()
         return self.model.grounding_encoder.image_encoder(image.unsqueeze(0))
 
     def forward(self, **kwargs):

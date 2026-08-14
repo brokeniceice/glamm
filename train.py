@@ -730,7 +730,8 @@ def validate_model_performance(validation_loader, training_model, current_epoch,
             data_batch = dict_to_cuda(data_batch)
             for key in ["global_enc_images", "grounding_enc_images"]:
                 data_batch[key] = data_batch[key].bfloat16()
-            torch.cuda.empty_cache()
+            if os.environ.get("GLAMM_PRESERVE_CUDA_CACHE", "0") != "1":
+                torch.cuda.empty_cache()
             # Model inference without gradient tracking
             with torch.no_grad():
                 results = training_model(**data_batch)
@@ -792,7 +793,8 @@ def validate_model_performance(validation_loader, training_model, current_epoch,
             for key in ["global_enc_images", "grounding_enc_images"]:
                 if data_batch[key] is not None:
                     data_batch[key] = data_batch[key].bfloat16()
-            torch.cuda.empty_cache()
+            if os.environ.get("GLAMM_PRESERVE_CUDA_CACHE", "0") != "1":
+                torch.cuda.empty_cache()
             # Model inference without gradient tracking
             with torch.no_grad():
                 predictions = training_model(**data_batch)

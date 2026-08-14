@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from transformers import CLIPImageProcessor, CLIPVisionConfig, CLIPVisionModel
@@ -57,7 +58,8 @@ class CLIPVisionTower(nn.Module):
             )
             image_features = self.feature_select(image_forward_outs).to(images.dtype)
 
-        torch.cuda.empty_cache()
+        if os.environ.get("GLAMM_PRESERVE_CUDA_CACHE", "0") != "1":
+            torch.cuda.empty_cache()
         if self.with_region:
             return image_features, image_forward_outs
         return image_features, None

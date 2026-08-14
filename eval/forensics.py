@@ -281,6 +281,9 @@ def _localization_record(
     record.update(_prediction_fields(output))
     record.update({
         "generated_explanation": output.get("generated_explanation"),
+        "gt_explanation": " ".join(
+            str((sample.get("manifest_row") or {}).get("explanation") or "").split()
+        ),
         "seg_triggered": bool(output.get("seg_triggered", False)),
         "has_pred_mask": output.get("pred_mask") is not None,
         "uses_gt_authenticity": uses_gt_authenticity,
@@ -301,6 +304,9 @@ def _localization_record(
     ):
         if key in output:
             record[key] = output[key]
+    record["repetition_flag"] = bool(
+        record.get("repetition_statistics", {}).get("is_repetition_loop", False)
+    )
     gt_mask = sample.get("masks")
     if gt_mask is None:
         raise ValueError(f"Eligible Fake sample {sample.get('sample_id')} has no GT mask")

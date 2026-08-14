@@ -129,12 +129,22 @@ class GLaMMForensicsBackend:
 
     def _batch(self, sample: Mapping[str, Any], assistant_content: str, *,
                question: str = FORENSICS_QUESTION, continue_assistant: bool = False):
-        evaluation_sample = copy.copy(dict(sample))
-        evaluation_sample["conversations"] = [self._conversation(
-            assistant_content, question=question, continue_assistant=continue_assistant
-        )]
+        return self._batch_many(
+            [sample], assistant_content, question=question,
+            continue_assistant=continue_assistant,
+        )
+
+    def _batch_many(self, samples, assistant_content: str, *,
+                    question: str = FORENSICS_QUESTION, continue_assistant: bool = False):
+        evaluation_samples = []
+        for sample in samples:
+            evaluation_sample = copy.copy(dict(sample))
+            evaluation_sample["conversations"] = [self._conversation(
+                assistant_content, question=question, continue_assistant=continue_assistant
+            )]
+            evaluation_samples.append(evaluation_sample)
         batch = custom_collate_fn(
-            [evaluation_sample], tokenizer=self.tokenizer, use_mm_start_end=self.use_mm_start_end,
+            evaluation_samples, tokenizer=self.tokenizer, use_mm_start_end=self.use_mm_start_end,
             inference=True, token_strategy="fixed_cls_query",
         )
         for key, value in tuple(batch.items()):
@@ -144,6 +154,114 @@ class GLaMMForensicsBackend:
                     value = value.to(self.dtype)
                 batch[key] = value
         return batch
+
+    def generate_localization_batch(self, samples, *, provide_gt_fake: bool,
+                                    generation_mode: str | None = None):
+        """Batched equivalent of ``generate_localization`` for equal-length prompts."""
+        samples = list(samples)
+        if not samples:
+            return []
+        if generation_mode is None:
+            generation_mode = "unified_prompt_gt_fake_prefix" if provide_gt_fake else "joint"
+        modes = {
+            "unified_fake_generate": (UNIFIED_FORENSICS_QUESTION, "", False),
+            "unified_prompt_gt_fake_prefix": (UNIFIED_FORENSICS_QUESTION, "[FAKE]", True),
+            "gt_fake_generate": (FORENSICS_QUESTION, "[FAKE]", True),
+            "legacy_gt_fake_generate": (FORENSICS_QUESTION, "[FAKE]", False),
+            "joint": (UNIFIED_FORENSICS_QUESTION, "", False),
+        }
+        if generation_mode not in modes:
+            raise ValueError(f"Unknown generation mode: {generation_mode}")
+        question, assistant_content, continue_assistant = modes[generation_mode]
+        batch = self._batch_many(
+            samples, assistant_content, question=question,
+            continue_assistant=continue_assistant,
+        )
+        original_sizes = [tuple(label.shape) for label in batch["label_list"]]
+        with torch.no_grad():
+            sequences, pred_masks, cls_output, details = self.model.evaluate(
+                batch["global_enc_images"], batch["grounding_enc_images"], batch["input_ids"],
+                batch["resize_list"], original_sizes, max_tokens_new=self.max_new_tokens,
+                bboxes=batch["bboxes"], force_cls_token=False, return_generation_details=True,
+            )
+        prompt_length = batch["input_ids"].shape[1]
+        eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
+        results = []
+        for index, sample in enumerate(samples):
+            generated_ids = sequences[index, prompt_length:]
+            # Batched generation pads rows that finish before their peers.  Keep
+            # the same sequence/score semantics as batch-size-one evaluation.
+            if eos_token_id is not None:
+                eos = generated_ids.eq(eos_token_id).nonzero(as_tuple=False).flatten()
+                if eos.numel():
+                    generated_ids = generated_ids[:int(eos[0]) + 1]
+            generated_token_ids = [int(value) for value in generated_ids.detach().cpu().tolist()]
+            seg_token_id = self.model.seg_token_idx
+            seg_triggered = seg_token_id in generated_token_ids
+            decoded_ids = generated_ids[generated_ids.ne(IMAGE_TOKEN_INDEX)]
+            generated_text = self.tokenizer.decode(decoded_ids, skip_special_tokens=False).strip()
+            generated_explanation = generated_text.replace("[SEG]", "").strip()
+            stop = classify_generation_stop(
+                generated_token_ids, seg_token_id=seg_token_id, eos_token_id=eos_token_id,
+                max_new_tokens=int(details.get("max_new_tokens", self.max_new_tokens)),
+                invalid_special_token_ids=tuple(
+                    value for value in (
+                        getattr(self.model, "cls_token_idx", None),
+                        getattr(self.model, "real_token_idx", None),
+                    ) if value is not None
+                ),
+            )
+            scores = [score[index] for score in details.get("scores", ())[:len(generated_token_ids)]]
+            trace = probability_trace(
+                scores, generated_token_ids, seg_token_id=seg_token_id, eos_token_id=eos_token_id
+            ) if scores else []
+            trace_summary = summarize_probability_trace(
+                trace, eos_position=stop["first_eos_position"]
+            )
+            row = sample.get("manifest_row") or {}
+            gt_explanation = " ".join(str(row.get("explanation") or "").split())
+            gt_ids = self.tokenizer(gt_explanation, add_special_tokens=False).input_ids
+            drift = explanation_drift(
+                generated_token_ids, gt_ids,
+                stop_token_ids=tuple(
+                    value for value in (seg_token_id, eos_token_id) if value is not None
+                ),
+                ignored_prefix_token_ids=(getattr(self.model, "fake_token_idx"),),
+            )
+            result = self._prediction_fields(cls_output, index=index)
+            pred_mask = pred_masks[index] if pred_masks[index].shape[0] else None
+            result.update({
+                "generated_explanation": generated_explanation,
+                "seg_triggered": seg_triggered,
+                "pred_mask": pred_mask,
+                "generation_mode": generation_mode,
+                "generated_text": generated_text,
+                "generated_token_ids": generated_token_ids,
+                "contains_fake_token": getattr(self.model, "fake_token_idx", None) in generated_token_ids,
+                "contains_real_token": getattr(self.model, "real_token_idx", None) in generated_token_ids,
+                "contains_seg_token": seg_token_id in generated_token_ids,
+                "max_new_tokens": int(details.get("max_new_tokens", self.max_new_tokens)),
+                "prompt_token_ids": [int(value) for value in batch["input_ids"][index].detach().cpu().tolist()],
+                "prompt_ends_with_eos": bool(
+                    eos_token_id is not None and int(batch["input_ids"][index, -1]) == eos_token_id
+                ),
+                "prompt_template_id": (
+                    CANONICAL_PROMPT_TEMPLATE_ID if question == CANONICAL_UNIFIED_QUESTION
+                    else "legacy_known_fake_prompt_v1"
+                ),
+                "prompt_sha256": (
+                    CANONICAL_PROMPT_SHA256 if question == CANONICAL_UNIFIED_QUESTION
+                    else hashlib.sha256((
+                        "The <image> provides an overview of the picture.\n" + question
+                    ).encode("utf-8")).hexdigest()
+                ),
+                "raw_prompt_text": batch.get("conversation_list", [None] * len(samples))[index],
+                "assistant_prefix": "[CLS] [FAKE]" if assistant_content else "[CLS]",
+                "seg_probability_trace": trace,
+                **stop, **trace_summary, **drift,
+            })
+            results.append(result)
+        return results
 
     def _causal_forward(self, sample: Mapping[str, Any], assistant_content: str):
         batch = self._batch(sample, assistant_content)
@@ -265,7 +383,16 @@ class GLaMMForensicsBackend:
             explanation = " ".join(str(row.get("explanation") or "").split())
             if not explanation:
                 raise ValueError(f"Fake sample {sample.get('sample_id')} has no GT explanation")
-            assistant_content = f"[FAKE] {explanation} [SEG]"
+            if sample.get("target_protocol") == "phrase_aligned":
+                field = sample.get("localization_field") or {}
+                phrase = " ".join(str(field.get("normalized_training_phrase") or "").split())
+                if not phrase:
+                    raise ValueError(
+                        f"Phrase-aligned sample {sample.get('sample_id')} has no authoritative phrase"
+                    )
+                assistant_content = f"[FAKE] {explanation}\nTarget regions: {phrase} [SEG]"
+            else:
+                assistant_content = f"[FAKE] {explanation} [SEG]"
         elif context == "minimal":
             assistant_content = f"[FAKE] {TF_MINIMAL_CONTEXT_TEMPLATE}"
         else:
@@ -277,6 +404,25 @@ class GLaMMForensicsBackend:
             "generated_explanation": None,
             "seg_triggered": True,
             "pred_mask": pred_masks if pred_masks is not None and pred_masks.shape[0] else None,
+        })
+        return result
+
+    def phrase_only_localization(self, sample: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Oracle diagnostic using only the authoritative target phrase before ``[SEG]``."""
+        field = sample.get("localization_field") or {}
+        phrase = " ".join(str(field.get("normalized_training_phrase") or "").split())
+        if not phrase:
+            raise ValueError(f"Fake sample {sample.get('sample_id')} has no authoritative phrase")
+        assistant_content = f"[FAKE] Target regions: {phrase} [SEG]"
+        _, output = self._causal_forward(sample, assistant_content)
+        result = self._prediction_fields(output)
+        pred_masks = output["pred_masks"][0]
+        result.update({
+            "generated_explanation": None,
+            "seg_triggered": True,
+            "pred_mask": pred_masks if pred_masks is not None and pred_masks.shape[0] else None,
+            "oracle_phrase": phrase,
+            "oracle_template": "[FAKE] Target regions: <authoritative phrase(s)> [SEG]",
         })
         return result
 

@@ -23,6 +23,9 @@ from .synthscars import polygon_to_mask, polygons_for_target
 REAL_TOKEN = "[REAL]"
 FAKE_TOKEN = "[FAKE]"
 SEG_TOKEN = "[SEG]"
+TARGET_PROTOCOL_HISTORICAL = "historical"
+TARGET_PROTOCOL_PHRASE_ALIGNED = "phrase_aligned"
+PHRASE_FIELD_PREFIX = "Target regions:"
 REAL_EXPLANATION = "No identifiable synthetic artifact evidence is detected."
 CANONICAL_UNIFIED_QUESTION = "Determine whether this image is authentic and explain the forensic evidence."
 CANONICAL_UNIFIED_USER_CONTENT = (
@@ -72,6 +75,7 @@ class UnifiedForensicsDataset(torch.utils.data.Dataset):
         image_size: int = 1024,
         global_enc_processor=None,
         transform=None,
+        target_protocol: str = TARGET_PROTOCOL_HISTORICAL,
     ) -> None:
         if split not in {"train", "val", "test"}:
             raise ValueError(f"Unsupported unified forensic split: {split}")
@@ -84,6 +88,11 @@ class UnifiedForensicsDataset(torch.utils.data.Dataset):
         )
         self.tokenizer = tokenizer
         self.split = split
+        if target_protocol not in {
+            TARGET_PROTOCOL_HISTORICAL, TARGET_PROTOCOL_PHRASE_ALIGNED,
+        }:
+            raise ValueError(f"Unsupported target protocol: {target_protocol}")
+        self.target_protocol = target_protocol
         self.rows = _load_jsonl(self.manifest_dir / f"{split}_combined.jsonl")
         self.global_enc_processor = global_enc_processor or CLIPImageProcessor.from_pretrained(
             global_image_encoder
@@ -137,20 +146,54 @@ class UnifiedForensicsDataset(torch.utils.data.Dataset):
         return torch.from_numpy(union.astype(np.float32)).unsqueeze(0)
 
     @staticmethod
-    def _target(row: Mapping[str, Any]) -> str:
+    def authoritative_localization_field(row: Mapping[str, Any]) -> dict[str, Any]:
+        """Construct the single-SEG localization field without paraphrasing refs."""
+        if row["forensics_domain"] != "fake":
+            return {
+                "raw_phrases": [], "normalized_training_phrase": None,
+                "construction_rule": "real_historical_protocol_unchanged",
+            }
+        raw_phrases = [" ".join(str(ref.get("phrase") or "").split()) for ref in row.get("refs") or []]
+        if not raw_phrases or any(not phrase for phrase in raw_phrases):
+            raise ValueError(f"Fake sample {row.get('sample_id')} lacks an authoritative phrase")
+        deduplicated = []
+        for phrase in raw_phrases:
+            if phrase not in deduplicated:
+                deduplicated.append(phrase)
+        return {
+            "raw_phrases": raw_phrases,
+            "normalized_training_phrase": "; ".join(deduplicated),
+            "construction_rule": (
+                "annotation_order_whitespace_normalized_exact_duplicate_deduplicated_semicolon_join"
+            ),
+        }
+
+    @staticmethod
+    def _target(
+        row: Mapping[str, Any], target_protocol: str = TARGET_PROTOCOL_HISTORICAL
+    ) -> str:
         if row["forensics_domain"] == "real":
             return f"{REAL_TOKEN} {REAL_EXPLANATION}"
         explanation = " ".join(str(row.get("explanation") or "").split())
         if not explanation:
             raise ValueError(f"Fake sample {row.get('sample_id')} has no explanation")
-        return f"{FAKE_TOKEN} {explanation} {SEG_TOKEN}"
+        if target_protocol == TARGET_PROTOCOL_HISTORICAL:
+            return f"{FAKE_TOKEN} {explanation} {SEG_TOKEN}"
+        if target_protocol != TARGET_PROTOCOL_PHRASE_ALIGNED:
+            raise ValueError(f"Unsupported target protocol: {target_protocol}")
+        phrase = UnifiedForensicsDataset.authoritative_localization_field(row)[
+            "normalized_training_phrase"
+        ]
+        return f"{FAKE_TOKEN} {explanation}\n{PHRASE_FIELD_PREFIX} {phrase} {SEG_TOKEN}"
 
     @staticmethod
-    def _conversation(row: Mapping[str, Any]) -> tuple[list[str], list[str]]:
+    def _conversation(
+        row: Mapping[str, Any], target_protocol: str = TARGET_PROTOCOL_HISTORICAL
+    ) -> tuple[list[str], list[str]]:
         conv = conversation_lib.default_conversation.copy()
         conv.messages = []
         conv.append_message(conv.roles[0], CANONICAL_UNIFIED_USER_CONTENT)
-        conv.append_message(conv.roles[1], UnifiedForensicsDataset._target(row))
+        conv.append_message(conv.roles[1], UnifiedForensicsDataset._target(row, target_protocol))
         return [CANONICAL_UNIFIED_QUESTION], [conv.get_prompt()]
 
     def __getitem__(self, index: int) -> dict[str, Any]:
@@ -173,7 +216,17 @@ class UnifiedForensicsDataset(torch.utils.data.Dataset):
 
         seg_valid = row["forensics_domain"] == "fake"
         masks = self._fake_union_mask(row, original_height, original_width) if seg_valid else None
-        questions, conversations = self._conversation(row)
+        questions, conversations = self._conversation(row, self.target_protocol)
+        if self.target_protocol == TARGET_PROTOCOL_PHRASE_ALIGNED:
+            localization_field = self.authoritative_localization_field(row)
+        else:
+            # Historical Phase 2A does not consume refs.phrase.  Keeping this
+            # path phrase-agnostic preserves compatibility with old manifests
+            # and test fixtures that legitimately omit that optional field.
+            localization_field = {
+                "raw_phrases": [], "normalized_training_phrase": None,
+                "construction_rule": "historical_protocol_does_not_consume_phrase",
+            }
         label = torch.full(
             (original_height, original_width), self.IGNORE_LABEL, dtype=torch.long
         )
@@ -196,4 +249,6 @@ class UnifiedForensicsDataset(torch.utils.data.Dataset):
             "manifest_row": dict(row),
             "prompt_template_id": CANONICAL_PROMPT_TEMPLATE_ID,
             "prompt_sha256": CANONICAL_PROMPT_SHA256,
+            "target_protocol": self.target_protocol,
+            "localization_field": localization_field,
         }
