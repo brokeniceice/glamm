@@ -40,7 +40,8 @@
 |---|---:|---|
 | Internal test | 2,208 = 1,104 Real + 1,104 Fake | classification 使用全部样本；G0 只对 1,104 个有有效 union mask 的 Fake 汇总 |
 | Official1000 | 1,000 Fake | official SynthScars test；classification 是单类 Fake 测试，ROC-AUC 不可定义；G0 对全部 1,000 张汇总 |
-| LOKI | 2,217 = 900 Real + 1,317 Fake | 复用 Phase 2C 已冻结的去重图像级外部集合 |
+| LOKI classification | 2,217 = 900 Real + 1,317 Fake | 复用 Phase 2C 已冻结的去重图像级外部集合 |
+| LOKI localization | 229 Fake | LEGION Table 2 使用的 fully-synthetic valid task scope；来自 LOKI `open_ended_vqa.json`，GT 是 regional bounding boxes 填充后取 union，不是像素级人工 mask |
 | RAISE | 998 Real | 复用 clean held-out manifest；原 1,000 张中 2 张不可解码，故实际 N=998；只适合报告 Real specificity/FPR |
 | AIGI-test | 1,731 = 870 Real + 861 Fake | 使用 NPR 专家训练入口的冻结 `datasets/AIGI-Holmes-Dataset/dataset/test.jsonl`；沿用 NPR loader：`mask` 非空判 Fake，否则判 Real |
 
@@ -61,6 +62,7 @@
 | ROC-AUC | Receiver Operating Characteristic – Area Under the Curve；ROC 曲线下面积，衡量排序能力，不依赖单一阈值 |
 | FPR | False Positive Rate；假阳性率；在 RAISE 上表示真实图被误判为 Fake 的比例 |
 | OOD | Out-of-Distribution；分布外数据 |
+| BBox | Bounding Box；边界框；LOKI localization GT 由 `[x,y,w,h]` 区域框填充为矩形 mask |
 | N / N/A | Number of samples / Not Applicable；样本数 / 当前数据范围下不适用 |
 
 ## 5. Internal test classification
@@ -121,11 +123,109 @@
 - C0：`outputs/phase3a1_paired_control/evaluation/g0/new_c0/G0/metrics.json`
 - P1：`outputs/phase3a_phrase_grounding/evaluation/official1000/G0/metrics.json`
 
-## 9. External OOD classification：CLS head
+## 9. LOKI external localization：G0 自由生成与 G1 known-Fake
+
+### 9.1 数据身份与 GT 口径
+
+此前 classification 使用的 2,217 张图像与 Table 2 localization 的 229 张图像来自同一个官方 LOKI 数据集，但属于不同 task JSON 和不同评测范围，并非严格子集关系：两者有 94 张图重叠，另有 135 张 localization 图像不在 `true_or_false.json` 的 classification scope 中。本地完整媒体包已包含 229/229 张 localization 图片，无需重复下载；缺失的是官方 UTF-16 `open_ended_vqa.json`，现已补入原 LOKI 实体目录，SHA256 为 `578ce8e551e9815480896796ffce236acda7f0a55f96b887c6fefcbee87a9db8`。
+
+LOKI 整体是一个包含 image、video、3D、text、audio 五种模态、26 个细分类别和约 18K 道题目的多模态 benchmark；这里的 18K 是跨模态、跨题型的**问题数**，不是图像数。其 image 模态公开了 7 个子类，共 2,217 张用于真假判断的唯一图片；每张图片对应两道语义相反的 True/False 问题，因此 `true_or_false.json` 有 4,434 行。分类集合构成为：
+
+| 图像子类 | Real | Fake | 合计 |
+|---|---:|---:|---:|
+| Animal | 115 | 284 | 399 |
+| Object | 58 | 196 | 254 |
+| Person | 120 | 120 | 240 |
+| Scene | 128 | 128 | 256 |
+| Satellite | 107 | 214 | 321 |
+| Medical | 200 | 200 | 400 |
+| Document | 172 | 175 | 347 |
+| **合计** | **900** | **1,317** | **2,217** |
+
+LEGION Table 1 将 LOKI 的定位范围定义为 229 个“由常见生成器完全合成、写实风格且具有有效区域标注”的 valid samples，Table 2 再将其用于跨域 localization。这 229 张不是从上述 2,217 张分类集合中随机抽取的子集，而是 LOKI 单独发布的 `open_ended_vqa.json` task scope：全部为 Fake，每张图均有人类异常解释和 regional bounding boxes；合计 687 个区域框。官方两个 task JSON 只有 94 张图片路径相交。
+
+LOKI 没有发布像素级人工 artifact masks。严格沿用 LEGION 公布的 `generate_loki_mask()`：将每个 `problems.regional[].region=[x,y,w,h]` 填充为矩形，再对同一图片的矩形取 union。本轮从 229 张图的 687 个区域框生成 229 张非空 bbox-union masks，保存在原路径 `datasets/LOKI/legion_localization/masks/`。因此下列结果应称为 **LOKI bbox-derived localization**，不能描述为像素级 mask localization。
+
+### 9.2 与 LEGION Table 2 对齐的指标口径（推理协议未对齐）
+
+Table 2 的 `mIoU` 使用全数据集累计像素后计算前景/背景 IoU 均值，`F1` 为全局前景像素 F1；表中统一使用百分数。
+
+| 模型 / 协议 | N | global fg/bg mIoU (%) | global FG F1 (%) | 相对 LEGION mIoU | 相对 LEGION F1 |
+|---|---:|---:|---:|---:|---:|
+| New C0 / 本项目 G0 | 229 | 43.02 | 2.72 | −5.64 | −13.99 |
+| P1 / 本项目 G0 | 229 | 43.22 | 3.09 | −5.44 | −13.62 |
+| LEGION / Table 2 定位协议 | 229 | 48.66 | 16.71 | — | — |
+
+本轮使用相同的公开 229-image scope、bbox rasterization 语义和最接近 Table 2 文字定义的 global-pixel aggregation，但**推理协议没有对齐**：LEGION 公布的 localization inference prompt 直接要求模型分析 artifacts 并输出 interleaved segmentation masks，不包含真实性判断；本项目 G0 则使用 unified authenticity-and-explanation prompt，让 LM 自由生成 `[REAL]` 或 `[FAKE]`。因此上表只能用于显示同一 GT/指标下的数值位置，不能称为 Table 2 的直接模型性能复现，也不能把差值解释为纯 localization 差距。
+
+### 9.3 本项目完整 G0 指标
+
+| 模型 | N | mean FG IoU | mean FG F1 | mean fg/bg mIoU | global FG IoU | global FG F1 | global fg/bg mIoU | `[SEG]` trigger rate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| C0 | 229 | 0.026546 | 0.044674 | 0.422165 | 0.013794 | 0.027212 | 0.430236 | 0.366812 |
+| P1 | 229 | 0.034444 | 0.057179 | 0.429338 | 0.015674 | 0.030865 | 0.432244 | 0.375546 |
+| P1 − C0 | — | +0.007898 | +0.012505 | +0.007173 | +0.001881 | +0.003653 | +0.002008 | +0.008734 |
+
+逐图 paired mean FG IoU 差为 `+0.007898`，bootstrap 95% CI=`[-0.000445,+0.016429]`，win/tie/loss=`51/147/31`，Wilcoxon p=`0.015516`。大量 ties 主要来自两模型在同一批样本上都没有产生有效定位 mask。
+
+这里必须区分“评测集合已知为 Fake”和“把 Fake 条件提供给模型”。本项目冻结的 G0 定义是：只在具有定位 GT 的 Fake 样本上统计，忽略独立 CLS head 的 classification gate，但仍使用 unified prompt 让 LM 自由生成真实性 verdict；它不向模型提供 GT Fake prefix。模型生成 `[REAL]` 时会按训练语法直接结束，生成 `[FAKE]` 时才继续解释并产生 `[SEG]`。逐样本生成路由如下：
+
+| 模型 | GT Fake 总数 | LM 生成 `[REAL]` | LM 生成 `[FAKE]` | 触发 `[SEG]` | 总体 trigger | 条件 trigger：`P([SEG] \| [FAKE])` | `[FAKE]` 但无 `[SEG]` |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| C0 | 229 | 144 | 85 | 84 | 36.68% | 98.82% | 1（重复生成至 400-token 上限） |
+| P1 | 229 | 142 | 87 | 86 | 37.55% | 98.85% | 1（重复生成至 400-token 上限） |
+
+因此，这个低 trigger 是本项目 G0 的“自由 LM verdict + localization”耦合结果：229 张 GT 全为 Fake，但 C0/P1 分别有 144/142 张被 LM 判成 `[REAL]`，所以没有 mask。条件于已经生成 `[FAKE]`，两者的 `[SEG]` 触发成功率都接近 99%；真正的“已判 Fake 但未触发 `[SEG]`”各只有 1 张。它不能用来断言 segmentation branch 自身只有约 37% 的触发能力。
+
+项目历史上的 G1 使用相同 unified prompt 并加入结构性 GT `[FAKE]` continuation prefix，才对应“模型已知该图为 Fake、随后自由生成解释和 `[SEG]`”的内部协议；TF 则进一步提供 GT explanation/phrase。常见的 fake-only localization 以及 LEGION Table 2 更接近这种已知伪造条件下的定位问题。若要补充与当前 C0/P1 架构最公平的 known-Fake localization，应在同一 229-image scope 上报告 G1；若要声称严格复现 LEGION inference protocol，还需另行审计并对齐其 artifact-localization prompt，不能直接把现有 G0 改名代替。
+
+### 9.4 G1 known-Fake 补充实验
+
+G1 与上述 G0 使用完全相同的 229 张图片、bbox-union GT、checkpoint、预处理、BF16、greedy decoding、400 max-new-tokens 和 `mask logit > 0` threshold；唯一协议变化是给模型加入结构性 GT `[FAKE]` continuation prefix。结果未覆盖 G0，分别保存在各模型的 `G1/` 目录。
+
+#### 9.4.1 与 Table 2 对齐的 global-pixel 指标
+
+| 模型 / 协议 | N | global fg/bg mIoU (%) | global FG F1 (%) | `[SEG]` trigger | 相对 LEGION mIoU | 相对 LEGION F1 |
+|---|---:|---:|---:|---:|---:|---:|
+| New C0 / G1 | 229 | 42.90 | 9.54 | 96.51% | −5.76 | −7.17 |
+| P1 / G1 | 229 | 42.54 | 14.39 | 96.07% | −6.12 | −2.32 |
+| LEGION / Table 2 定位协议 | 229 | 48.66 | 16.71 | N/A | — | — |
+
+G1 显著恢复了定位触发和前景指标，但两个方向不同：相对各自 G0，C0/P1 的 global FG IoU 分别从 0.013794/0.015674 升至 0.050079/0.077554，global FG F1 从 2.72%/3.09% 升至 9.54%/14.39%；与此同时 global BG IoU 从 0.846678/0.848813 降至 0.807960/0.773340。前景改善与背景下降在 fg/bg 均值中互相抵消，所以 global fg/bg mIoU 没有随 F1 上升，分别由 43.02%/43.22% 变为 42.90%/42.54%。这不是指标计算矛盾，而是 G1 预测更多前景时同时增加了 false-positive foreground pixels。
+
+#### 9.4.2 本项目完整 G1 指标
+
+| 模型 | N | mean FG IoU | mean FG F1 | mean fg/bg mIoU | global FG IoU | global FG F1 | global fg/bg mIoU | `[SEG]` trigger rate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| C0 | 229 | 0.054904 | 0.090162 | 0.422623 | 0.050079 | 0.095381 | 0.429019 | 0.965066 |
+| P1 | 229 | 0.076893 | 0.126401 | 0.425346 | 0.077554 | 0.143945 | 0.425447 | 0.960699 |
+| P1 − C0 | — | +0.021989 | +0.036239 | +0.002723 | +0.027476 | +0.048564 | −0.003572 | −0.004367 |
+
+C0 的 8 个未触发样本全部为重复生成至 400-token 上限；P1 的 9 个未触发样本包括 6 个重复生成和 3 个非法 special-token trajectory。G1 消除了大多数 G0 `[REAL]` 路由失败，但不能消除长文本重复或生成中途重新出现 `[REAL]` 等语言解码失败。
+
+P1−C0 的逐图 paired mean FG IoU 差为 `+0.021989`，bootstrap 95% CI=`[+0.004666,+0.039517]`，win/tie/loss=`127/35/67`，Wilcoxon p=`0.000253`；mean FG F1 差为 `+0.036239`，95% CI=`[+0.011988,+0.060807]`。mean fg/bg mIoU 差仅 `+0.002723`，95% CI=`[-0.009393,+0.014582]`，不能据此确认 P1 在两类平均指标上优于 C0。
+
+G1 相对 G0 的逐图 mean FG IoU 改善为：C0 `+0.028359`，95% CI=`[+0.018293,+0.040784]`，win/tie/loss=`108/95/26`；P1 `+0.042450`，95% CI=`[+0.028426,+0.057245]`，win/tie/loss=`120/66/43`。这确认 LOKI G0 的低值有很大一部分来自自由真实性 verdict 未进入定位路径；但 G1 仍不是 LEGION prompt 的逐字节复现，不能把剩余差距归因于单一模型因素。
+
+G1 机器可读来源：
+
+- C0：`outputs/phase3a1_paired_control/evaluation/external_g0/loki/new_c0/G1/`
+- P1：`outputs/phase3a1_paired_control/evaluation/external_g0/loki/p1/G1/`
+- G0/G1 配对统计：`outputs/phase3a1_paired_control/evaluation/external_g0/loki/g1_comparison.json`
+- 229 条逐样本四轨迹对照：`outputs/phase3a1_paired_control/evaluation/external_g0/loki/g1_per_sample_comparison.jsonl`
+
+G0 机器可读来源：
+
+- 数据审计：`datasets/LOKI/legion_localization/summary.json` 与 `manifest.jsonl`
+- C0：`outputs/phase3a1_paired_control/evaluation/external_g0/loki/new_c0/G0/metrics.json`
+- P1：`outputs/phase3a1_paired_control/evaluation/external_g0/loki/p1/G0/metrics.json`
+- 配对比较：`outputs/phase3a1_paired_control/evaluation/external_g0/loki/comparison.json`
+
+## 10. External OOD classification：CLS head
 
 所有外部结果使用相同 canonical prompt、fixed-`[CLS]` evaluator、BF16 inference、batch size 8 和固定 0.5 分类阈值。外部集未参与训练、checkpoint selection 或 threshold calibration。
 
-### 9.1 LOKI
+### 10.1 LOKI
 
 | 模型 | N | Accuracy | Precision | Fake recall | F1 | ROC-AUC |
 |---|---:|---:|---:|---:|---:|---:|
@@ -135,7 +235,7 @@
 
 P1 在固定 0.5 阈值下的 Accuracy/F1/recall 低于 C0，但 ROC-AUC 更高；这表示排序能力与固定阈值 operating point 给出不同方向，不能只报其中一项。
 
-### 9.2 RAISE clean held-out
+### 10.2 RAISE clean held-out
 
 | 模型 | N | Real specificity | FPR | CLS–LM agreement |
 |---|---:|---:|---:|---:|
@@ -145,7 +245,7 @@ P1 在固定 0.5 阈值下的 Accuracy/F1/recall 低于 C0，但 ROC-AUC 更高�
 
 RAISE 全部为 Real，因而不能计算有意义的 Fake precision/recall/F1 或 ROC-AUC。P1 比 C0 少 5 个 false positives（C0=11，P1=6）。
 
-### 9.3 AIGI-test
+### 10.3 AIGI-test
 
 | 模型 | N | Accuracy | Precision | Fake recall | F1 | ROC-AUC |
 |---|---:|---:|---:|---:|---:|---:|
@@ -155,7 +255,7 @@ RAISE 全部为 Real，因而不能计算有意义的 Fake precision/recall/F1 �
 
 P1 在 AIGI-test 的所有列示 CLS 指标上均高于 C0。
 
-## 10. External OOD classification：LM verdict 诊断
+## 11. External OOD classification：LM verdict 诊断
 
 | 数据集 | 模型 | LM Accuracy | LM F1 | LM ROC-AUC | CLS–LM agreement |
 |---|---|---:|---:|---:|---:|
@@ -172,10 +272,12 @@ P1 在 AIGI-test 的所有列示 CLS 指标上均高于 C0。
 - P1 summary：`outputs/phase3a1_paired_control/evaluation/external_classification/p1/summary.json`
 - 各数据集逐样本：上述目录下的 `loki/`、`raise/`、`aigi_test/` 中 `predictions.jsonl`
 
-## 11. 汇总结论与边界
+## 12. 汇总结论与边界
 
 1. Internal classification：P1 的 CLS Accuracy 比 C0 高 0.006341；Internal G0 mean FG IoU 高 0.029874。
 2. Official1000：P1 的 standalone CLS Fake recall 高 0.011000，G0 mean FG IoU 高 0.049758。
 3. External classification：P1 在 RAISE specificity 和 AIGI-test 的 Accuracy/F1/ROC-AUC 上更高；LOKI 则呈现 fixed-threshold Accuracy/F1 下降但 ROC-AUC 上升的混合结果，不能概括为全面 OOD 提升。
-4. External 实验是 classification-only；不能据此推断 LOKI、RAISE 或 AIGI-test 上的 localization/G0 表现。
-5. 以上是冻结 checkpoint 的观测比较。matched new C0 缩小了训练轨迹混淆，但原始 P1 step-0 snapshot 不可恢复的证据边界仍然存在。
+4. LOKI G0 diagnostic：P1 的 global fg/bg mIoU/F1 为 43.22%/3.09%，C0 为 43.02%/2.72%；低于 38% 的总体 `[SEG]` trigger 主要由 LM 把大量 GT Fake 判为 `[REAL]` 导致。
+5. LOKI G1 known-Fake：C0/P1 trigger 恢复至 96.51%/96.07%，global FG F1 升至 9.54%/14.39%；P1 的逐图 mean FG IoU 比 C0 高 0.021989，95% CI 不跨 0。但 global fg/bg mIoU 为 42.90%/42.54%，因新增前景预测同时降低 background IoU，不能只凭 trigger 或 FG F1 推断两类平均指标同步改善。
+6. LOKI G0/G1 都使用 bbox-derived union masks；G1 比 G0 更接近 known-Fake localization，但仍与 LEGION 的 direct artifact-localization prompt 不同。RAISE 与 AIGI-test 仍只有 classification-only 结果。
+7. 以上是冻结 checkpoint 的观测比较。matched new C0 缩小了训练轨迹混淆，但原始 P1 step-0 snapshot 不可恢复的证据边界仍然存在。

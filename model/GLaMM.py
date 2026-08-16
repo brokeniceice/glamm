@@ -257,7 +257,8 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
                       bboxes: torch.FloatTensor, input_ids: torch.LongTensor, labels: torch.LongTensor,
                       attention_masks: torch.LongTensor, offset: torch.LongTensor, masks_list: List[torch.FloatTensor],
                       label_list: List[torch.Tensor], resize_list: List[tuple], inference: bool = False,
-                      cls_labels: torch.LongTensor = None, seg_valid: torch.BoolTensor = None, **kwargs, ):
+                      cls_labels: torch.LongTensor = None, seg_valid: torch.BoolTensor = None,
+                      precomputed_grounding_embeddings: torch.FloatTensor = None, **kwargs, ):
 
         # Handle inference or training paths
         if inference:
@@ -279,7 +280,11 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
 
         if grounding_enc_images is not None:
             # Extract grounding encoder image embeddings
-            image_embeddings = self.get_grounding_encoder_embs(grounding_enc_images)
+            image_embeddings = (
+                precomputed_grounding_embeddings
+                if precomputed_grounding_embeddings is not None
+                else self.get_grounding_encoder_embs(grounding_enc_images)
+            )
             assert image_embeddings.shape[0] == len(offset) - 1
 
             # Extract the causal state immediately preceding each [SEG].
@@ -351,6 +356,12 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
         # Expose teacher-forced masks for validation diagnostics. This is a
         # non-loss output and does not alter training gradients or weighting.
         loss_dict["pred_masks"] = pred_masks
+        # The grounding image encoder is frozen and evaluated under no_grad.
+        # Phase 3B may reuse these exact embeddings for a second mask-only
+        # context branch on the same image, avoiding redundant SAM encoding.
+        loss_dict["grounding_image_embeddings"] = (
+            image_embeddings.detach() if grounding_enc_images is not None else None
+        )
         return loss_dict
 
     def _create_expanded_token_mask(self, input_ids, token_idx, target_length=None, min_token_index=0):
@@ -464,12 +475,22 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
             global_enc_images = self._prepare_global_enc_image(global_enc_images, offset)
         bboxes_list = bboxes
 
+        # A mask-only replay branch deliberately carries no LM targets.  Some
+        # transformers versions return NaN for cross entropy when every label
+        # is IGNORE_INDEX, so omit labels for that forward and attach an exact
+        # differentiable zero instead.  Hidden states/logits remain available
+        # to the [SEG] predictor and mask decoder.
+        all_text_ignored = labels is not None and not labels.ne(-100).any()
+        forward_labels = None if all_text_ignored else labels
         output = super().forward(
-            images=global_enc_images, attention_mask=attention_masks, input_ids=input_ids, labels=labels,
+            images=global_enc_images, attention_mask=attention_masks, input_ids=input_ids, labels=forward_labels,
             output_hidden_states=True, bboxes=bboxes_list, )
-        expanded_labels = output.get("expanded_labels", labels)
-        if self.per_sample_text_loss_normalization:
+        expanded_labels = labels if all_text_ignored else output.get("expanded_labels", labels)
+        if all_text_ignored:
+            output.loss = output.logits.sum() * 0.0
+        elif self.per_sample_text_loss_normalization:
             output.loss = per_sample_causal_text_loss(output.logits, expanded_labels)
+        output["expanded_labels"] = expanded_labels
         output_hidden_states = output.hidden_states
         return output, output_hidden_states
 

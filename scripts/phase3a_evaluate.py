@@ -49,6 +49,8 @@ def parse_args(argv=None):
     parser.add_argument("--generation-batch-size", type=int, default=1)
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--reset", action="store_true")
+    parser.add_argument("--skip-spatial-save", action="store_true",
+                        help="Keep exact metrics but omit logits/binary tensors (validation selector only).")
     return parser.parse_args(argv)
 
 
@@ -86,19 +88,21 @@ def _union_logits(pred_mask: torch.Tensor | None, shape: tuple[int, int]) -> tor
 
 
 def preserve_spatial_prediction(
-    root: Path, mode: str, sample: dict, output: dict, record: dict,
+    root: Path, mode: str, sample: dict, output: dict, record: dict, *, save_spatial: bool = True,
 ) -> dict:
     gt = torch.as_tensor(sample["masks"]).bool().any(dim=0).cpu()
     logits = _union_logits(output.get("pred_mask"), tuple(gt.shape))
     union_logits = logits.amax(dim=0) if logits.shape[0] else torch.full(gt.shape, -torch.inf)
     binary = union_logits > MASK_LOGIT_THRESHOLD
     stem = stable_stem(str(sample["sample_id"]))
-    tensor_dir = root / mode / "spatial"
-    tensor_dir.mkdir(parents=True, exist_ok=True)
-    logits_path = tensor_dir / f"{stem}.logits.pt"
-    binary_path = tensor_dir / f"{stem}.binary.pt"
-    torch.save(logits.to(torch.bfloat16), logits_path)
-    torch.save(binary, binary_path)
+    logits_path = binary_path = None
+    if save_spatial:
+        tensor_dir = root / mode / "spatial"
+        tensor_dir.mkdir(parents=True, exist_ok=True)
+        logits_path = tensor_dir / f"{stem}.logits.pt"
+        binary_path = tensor_dir / f"{stem}.binary.pt"
+        torch.save(logits.to(torch.bfloat16), logits_path)
+        torch.save(binary, binary_path)
     tn = int((~binary & ~gt).sum().item())
     fg_iou = float(record["image_iou"])
     fg_f1 = float(record["image_pixel_f1"])
@@ -107,8 +111,8 @@ def preserve_spatial_prediction(
     record.update({
         "decoded_text": output.get("generated_text"),
         "generated_localization_phrase": None,
-        "mask_logits_path": str(logits_path.resolve()),
-        "binary_mask_path": str(binary_path.resolve()),
+        "mask_logits_path": None if logits_path is None else str(logits_path.resolve()),
+        "binary_mask_path": None if binary_path is None else str(binary_path.resolve()),
         "tn": tn,
         "foreground_iou": fg_iou,
         "foreground_f1": fg_f1,
@@ -221,7 +225,10 @@ def main(argv=None):
                     sample, output, "unified_fake_generate", uses_gt_authenticity=False,
                     uses_gt_explanation=False, classification_gate=False,
                 )
-                record = preserve_spatial_prediction(output_root, "G0", sample, output, record)
+                record = preserve_spatial_prediction(
+                    output_root, "G0", sample, output, record,
+                    save_spatial=not cli.skip_spatial_save,
+                )
                 append_jsonl(output_root / "G0" / "predictions.jsonl", record)
             print(f"phase3a-G0 {min(start + batch_size, len(fake_indices))}/{len(fake_indices)}", flush=True)
 
@@ -241,6 +248,7 @@ def main(argv=None):
             )
             record = preserve_spatial_prediction(
                 output_root, "tf_full_context", sample, output, record,
+                save_spatial=not cli.skip_spatial_save,
             )
             append_jsonl(output_root / "tf_full_context" / "predictions.jsonl", record)
         if "phrase_only" in requested and sample_id not in completed["phrase_only"]:
@@ -252,7 +260,10 @@ def main(argv=None):
             record["uses_gt_localization_phrase"] = True
             record["oracle_phrase"] = output["oracle_phrase"]
             record["oracle_template"] = output["oracle_template"]
-            record = preserve_spatial_prediction(output_root, "phrase_only", sample, output, record)
+            record = preserve_spatial_prediction(
+                output_root, "phrase_only", sample, output, record,
+                save_spatial=not cli.skip_spatial_save,
+            )
             append_jsonl(output_root / "phrase_only" / "predictions.jsonl", record)
         if (index + 1) % 25 == 0:
             print(f"phase3a-diagnostics {index + 1}/{limit}", flush=True)
