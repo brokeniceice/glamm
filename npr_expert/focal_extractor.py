@@ -90,3 +90,20 @@ class FrozenFOCALViT(nn.Module):
             max_features = spatial_features.amax(dim=(2, 3))
             pooled_features.append(torch.cat([mean_features, max_features], dim=1))
         return torch.cat(pooled_features, dim=0)
+
+    @torch.no_grad()
+    def forward_spatial(self, images):
+        """Return the published FP32 image-encoder map before mean/max pooling.
+
+        The historical :meth:`forward` implementation is deliberately left
+        untouched so adding this diagnostic API cannot change its numerics.
+        """
+        if images.ndim != 4 or images.shape[1] != 3:
+            raise ValueError(f"FOCAL 输入应为 [B,3,H,W]，实际为 {tuple(images.shape)}")
+        device = next(self.image_encoder.parameters()).device
+        spatial = []
+        for image_chunk in images.split(self.micro_batch_size):
+            image_chunk = image_chunk.to(device=device, dtype=torch.float32, non_blocking=True)
+            with torch.cuda.amp.autocast(enabled=False):
+                spatial.append(self.image_encoder(image_chunk))
+        return torch.cat(spatial, dim=0)

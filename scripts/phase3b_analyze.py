@@ -5,15 +5,19 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import numpy as np
 from scipy import stats
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from dataset.forensics.unified import UnifiedForensicsDataset
 from tools.phase3b_replay import phrase_overlap, replay_eligibility
 
-ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "outputs/phase3b_generated_replay"
 ARMS = ("b0_gold_replay", "b1_generated_replay")
 

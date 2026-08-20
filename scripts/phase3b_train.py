@@ -117,7 +117,7 @@ def main(argv=None):
     torch.distributed.barrier()
     seed = int(config["seed"])
     physical_gpu = int(os.environ.get("PHASE3B_PHYSICAL_GPU", "-1"))
-    expected_gpu = 1
+    expected_gpu = 0
     if physical_gpu != expected_gpu:
         raise RuntimeError(f"Phase 3B {config['replay']['context']} arm requires physical GPU {expected_gpu}, got {physical_gpu}")
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)

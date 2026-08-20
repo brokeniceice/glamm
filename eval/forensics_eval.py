@@ -269,6 +269,30 @@ class GLaMMForensicsBackend:
             output = self.model.model_forward(**batch)
         return batch, output
 
+    @staticmethod
+    def authoritative_phrase(sample: Mapping[str, Any]) -> str:
+        """Return the frozen phrase-aligned target used by Phase 3A diagnostics."""
+        field = sample.get("localization_field") or {}
+        phrase = " ".join(str(field.get("normalized_training_phrase") or "").split())
+        if not phrase:
+            raise ValueError(f"Fake sample {sample.get('sample_id')} has no authoritative phrase")
+        return phrase
+
+    @classmethod
+    def phrase_only_content(cls, sample: Mapping[str, Any]) -> str:
+        return f"[FAKE] Target regions: {cls.authoritative_phrase(sample)} [SEG]"
+
+    @classmethod
+    def tf_phrase_content(cls, sample: Mapping[str, Any]) -> str:
+        row = cls._row_for_sample(sample)
+        explanation = " ".join(str(row.get("explanation") or "").split())
+        if not explanation:
+            raise ValueError(f"Fake sample {sample.get('sample_id')} has no GT explanation")
+        return (
+            f"[FAKE] {explanation}\nTarget regions: "
+            f"{cls.authoritative_phrase(sample)} [SEG]"
+        )
+
     def detection(self, sample: Mapping[str, Any]) -> Mapping[str, Any]:
         batch = self._batch(sample, "")
         # Detection consumes only the global encoder and fixed [CLS] state.
@@ -379,19 +403,13 @@ class GLaMMForensicsBackend:
 
     def teacher_forced_localization(self, sample: Mapping[str, Any], *, context: str) -> Mapping[str, Any]:
         if context == "full":
-            row = self._row_for_sample(sample)
-            explanation = " ".join(str(row.get("explanation") or "").split())
-            if not explanation:
-                raise ValueError(f"Fake sample {sample.get('sample_id')} has no GT explanation")
             if sample.get("target_protocol") == "phrase_aligned":
-                field = sample.get("localization_field") or {}
-                phrase = " ".join(str(field.get("normalized_training_phrase") or "").split())
-                if not phrase:
-                    raise ValueError(
-                        f"Phrase-aligned sample {sample.get('sample_id')} has no authoritative phrase"
-                    )
-                assistant_content = f"[FAKE] {explanation}\nTarget regions: {phrase} [SEG]"
+                assistant_content = self.tf_phrase_content(sample)
             else:
+                row = self._row_for_sample(sample)
+                explanation = " ".join(str(row.get("explanation") or "").split())
+                if not explanation:
+                    raise ValueError(f"Fake sample {sample.get('sample_id')} has no GT explanation")
                 assistant_content = f"[FAKE] {explanation} [SEG]"
         elif context == "minimal":
             assistant_content = f"[FAKE] {TF_MINIMAL_CONTEXT_TEMPLATE}"
@@ -409,11 +427,8 @@ class GLaMMForensicsBackend:
 
     def phrase_only_localization(self, sample: Mapping[str, Any]) -> Mapping[str, Any]:
         """Oracle diagnostic using only the authoritative target phrase before ``[SEG]``."""
-        field = sample.get("localization_field") or {}
-        phrase = " ".join(str(field.get("normalized_training_phrase") or "").split())
-        if not phrase:
-            raise ValueError(f"Fake sample {sample.get('sample_id')} has no authoritative phrase")
-        assistant_content = f"[FAKE] Target regions: {phrase} [SEG]"
+        phrase = self.authoritative_phrase(sample)
+        assistant_content = self.phrase_only_content(sample)
         _, output = self._causal_forward(sample, assistant_content)
         result = self._prediction_fields(output)
         pred_masks = output["pred_masks"][0]

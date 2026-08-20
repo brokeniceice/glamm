@@ -254,11 +254,27 @@ class OfficialNPRSRM(nn.Module):
         npr = self.maxpool(self.relu(self.bn1(self.conv1(npr_images * 2.0 / 3.0))))
         return self.avgpool(self.layer2(self.layer1(npr))).flatten(1).float()
 
+    def extract_npr_spatial_features(self, images):
+        """Return the official NPR ``layer2`` map before global pooling.
+
+        This read-only Phase 3C.1 API intentionally duplicates the existing
+        branch graph instead of routing :meth:`extract_npr_features` through a
+        new helper.  The historical classification path therefore remains
+        byte-for-byte unchanged.
+        """
+        npr_images = images - self.interpolate(images, 0.5)
+        npr = self.maxpool(self.relu(self.bn1(self.conv1(npr_images * 2.0 / 3.0))))
+        return self.layer2(self.layer1(npr))
+
     def extract_srm_features(self, images):
         """Frozen Phase 2C SRM backend feature before the historical gate."""
         return self.srm_pool(
             self.srm_stem(self.srm_residual_features(images))
         ).flatten(1).float()
+
+    def extract_srm_spatial_features(self, images):
+        """Return the frozen SRM stem map before ``srm_pool``."""
+        return self.srm_stem(self.srm_residual_features(images))
 
     def branch_logits(self, images):
         """Expose standalone branch scores under the historical shared head."""

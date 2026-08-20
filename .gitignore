@@ -17,7 +17,7 @@ checkpoints_stage2/
 datasets
 
 # Output
-outputs/
+outputs
 
 # Temporary
 *.log
