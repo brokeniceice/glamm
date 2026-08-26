@@ -1,0 +1,22 @@
+{
+  "status": "FROZEN_BEFORE_CHECKPOINT_SELECTION_AND_FINAL_RESULTS",
+  "primary_contrast": "P3D1-Q2 minus P3D1-R3",
+  "bootstrap_repeats": 10000,
+  "bootstrap_seed": 3407,
+  "classification_nonregression_tolerance": -0.005,
+  "GATE_Q2_REWARD_MORE_EFFECTIVE_SUPPORTED": {
+    "mean_foreground_iou_delta": ">0",
+    "mean_foreground_iou_ci_lower": ">0",
+    "mean_foreground_f1_delta": ">0",
+    "R_phrase_sem_delta": ">0",
+    "classification_accuracy_delta": ">=-0.005"
+  },
+  "GATE_REWARD_FORMULATION_NOT_PRIMARY_BOTTLENECK": {
+    "foreground_iou_ci_contains_zero": true,
+    "foreground_f1_ci_contains_zero": true,
+    "R_phrase_sem_ci_contains_zero": true,
+    "classification_nonregression": true
+  },
+  "fallback_gate": "GATE_Q2_NOT_BETTER_THAN_R3",
+  "no_post_result_threshold_or_formula_changes": true
+}

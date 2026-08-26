@@ -136,7 +136,7 @@ def evaluate(condition: str, device_name: str, max_samples: int | None) -> None:
                     uses_gt_explanation=False, classification_gate=False,
                 )
                 record = preserve_spatial_prediction(
-                    root, "P1_G0", sample, generated, record, save_spatial=False,
+                    root, "G0", sample, generated, record, save_spatial=False,
                 )
                 record["condition"] = condition
                 record["corrupted_rgb_sha256"] = image_hash

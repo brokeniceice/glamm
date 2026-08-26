@@ -1,0 +1,82 @@
+experiment:
+  name: P4C-B-EVIDENCE-READER
+  seed: 3407
+  output_root: outputs/phase4c_b_evidence_reader
+  cache_root: /data/yz/groundingLMM_official/outputs/phase4c_b_evidence_reader/cache
+  checkpoint_root: /data/yz/groundingLMM_official/checkpoints/phase4c_b_evidence_reader
+p1:
+  model_config: configs/phase3a_p1.yaml
+  checkpoint: /data/yz/groundingLMM_official/checkpoints/phase3a_phrase_grounding/p1/best/checkpoint/mp_rank_00_model_states.pt
+  checkpoint_sha256: fa4856f8c173c300050c3ae2149354e63a52bbced762d83fe518e9666136b326
+  optimizer_step: 3500
+  epoch: 7
+phase4c_a:
+  output_root: outputs/phase4c_a_clip_forensic_adapter
+  clip_proj_checkpoint: /data/yz/groundingLMM_official/checkpoints/phase4c_a_clip_forensic_adapter/clip_proj/selected.pt
+  clip_proj_sha256: 0a1c83259f1dfa0ca8ea5f24f0b234f311c4440ae092b157e44abfee7806120b
+  forensic_adapter_checkpoint: /data/yz/groundingLMM_official/checkpoints/phase4c_a_clip_forensic_adapter/forensic_adapter/selected.pt
+  forensic_adapter_sha256: 725dd44e0c867360e7a963eb13d8312187fff185849bd52de6b78d4b27a078f7
+  selected_epoch: 4
+  feature_shape: [256, 24, 24]
+frozen_spatial_cache:
+  phase3c1_root: outputs/phase3c1_spatial_probe
+  clip_train_ids_sha256: 09b12de63935f86f30875067623bc3908895c48f534961c61ca25f26abf237fe
+  clip_val_ids_sha256: 2b12a1c0280f578278e29790d210cca338064828480d4d087e2624c6edecf589
+rollout:
+  cache: outputs/phase3b_generated_replay/cache/train_fake_p1_g0.jsonl
+  manifest: outputs/phase3b_generated_replay/cache/cache_manifest.json
+  cache_sha256: 6ab4c428748e426132edaf6570ee38f12bbc8c1a2e0d44b089152563fd0990ed
+  protocol: frozen_off_policy_p1_canonical_g0_batch1
+data:
+  manifest_dir: outputs/data_audits/unified_forensics_split_v1
+  datasets_root: datasets
+  synthscars_root: datasets/SynthScars
+  raw_train_fake: 8836
+  eligible_train_fake: 8690
+  excluded_train_fake: 146
+  val_fake: 1106
+  target: official_annotation_derived_per_image_all_reference_union
+prompt:
+  id: unified_forensics_v1
+  text: Determine whether this image is authentic and explain the forensic evidence.
+reader:
+  embed_dim: 256
+  num_heads: 4
+  head_dim: 64
+  dropout: 0.0
+  layers: 1
+  positional_embedding: none
+  beta_initialization: 0.0
+training:
+  max_epochs: 10
+  micro_batch_size: 1
+  gradient_accumulation_steps: 4
+  effective_batch_size: 4
+  steps_per_epoch: 2173
+  total_optimizer_steps: 21730
+  total_exposures_per_arm: 86900
+  precision: bf16
+  gradient_clip_norm: 1.0
+optimizer:
+  name: AdamW
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  warmup_steps: 1087
+  scheduler: linear_warmup_then_cosine_decay
+loss:
+  bce_weight: 2.0
+  dice_weight: 0.5
+selector:
+  candidates: [0,1,2,3,4,5,6,7,8,9,10]
+  primary: validation_fresh_G0_mean_foreground_iou
+  tie_break: validation_fresh_G0_mean_foreground_f1
+  threshold_logit: 0.0
+evaluation:
+  generation_batch_size: 1
+  max_new_tokens: 400
+  bootstrap_repeats: 10000
+  bootstrap_seed: 3407
+  modes: [G0, phrase_only, tf_full_context]
+  sealed: [internal_test, official1000]
+

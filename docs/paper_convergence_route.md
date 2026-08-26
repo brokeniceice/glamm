@@ -254,3 +254,104 @@ Ours 内部比较必须严格 matched。Stage-II 至少考虑：
 - 任何跨实验数值比较先核对 dataset、split、category、target representation、metric、aggregation 与 threshold。
 - 诊断 intervention、相关性与 probe 结果保持保守表述，不自动升级为严格因果结论或架构有效性证明。
 - 未列为 `AUTHORIZED` 的训练、模型更新、mask 生成、architecture fusion 或自动下一阶段均须再次获得明确授权。
+
+## 14. 2026-08-22 progress addendum（历史追加，不重写前文）
+
+本节记录第 7、11、12 节写成后的实际进展。前文中的“当前唯一授权”与候选路线描述保留为当时的历史状态；截至本节日期，以下机器可读 artifact 与阶段报告构成更新后的状态。
+
+### 14.1 Phase 3D.0 / 3D.0-R / 3D.0-S — COMPLETED
+
+Phase 3D.0 在 frozen P1 下完成 rollout/reward preflight，没有 optimizer、backward 或模型更新，主门为 `GATE_EVIDENCE_REWARD_PREFLIGHT_SUPPORTED`，selected reward 为 R3。随后 Phase 3D.0-R 完成 reward reformulation，selected reward 为 Q2，主门为 `GATE_REFORMULATED_REWARD_SUPPORTED`；Phase 3D.0-S 完成独立 GPT semantic audit。上述 gate 只支持进入受控 Phase 3D.1 比较，不构成 reward judge 完全可靠或 held-out 泛化的证明。internal test 未用于 reward/protocol 选择。详见 [Phase 3D.0](phase3d0_evidence_aware_reward_preflight.md)、[Phase 3D.0-R](phase3d0r_evidence_aware_reward_reformulation.md) 与 [Phase 3D.0-S](phase3d0s_independent_gpt_semantic_audit.md)。
+
+### 14.2 Phase 3D.1 — COMPLETED
+
+P1-FROZEN、R3 与 Q2 完成 matched policy-optimization comparison；R3 选择 step 750，Q2 选择 step 2000。Q2 相对 R3 的 validation localization 差异没有显著优势，最终主门为 `GATE_REWARD_FORMULATION_NOT_PRIMARY_BOTTLENECK`。没有 held-out test；reward route 已停止，未自动启动额外 reward tuning、RSFT、FEPN 或架构修改。详见 [Phase 3D.1](phase3d1_evidence_aware_policy_optimization.md)。
+
+### 14.3 Phase 3D.2 — COMPLETED（历史结果；解释受 3D.2-A 限制）
+
+Phase 3D.2 仅训练 `text_hidden_fcs + mask_decoder`，使用 Fake-only authoritative teacher-forced context、BCE+Dice、1,000 Fake exposures、250 steps。参数不变性、梯度与行为审计通过；所有 training checkpoints 的既有 TF-PHRASE validation 数值低于 step 0，formal selector 回退原始 P1。internal test 与 official1000 保持封存。历史主门为 `GATE_EXISTING_SPATIAL_PATH_OPTIMIZATION_INSUFFICIENT`。详见 [Phase 3D.2](phase3d2_direct_spatial_path_optimization.md)。
+
+Phase 3D.2-A 随后发现 training 与既有 TF-PHRASE evaluator 的 user prompt 不一致。因此 Phase 3D.2 的既有数值与 step0 selection 仍是历史事实，但不能再被用于回答 matched train/eval protocol 下的 fitting/generalization 归因；这项解释限制不静默改写 Phase 3D.2 artifact。其状态明确记为：`GATE_EXISTING_SPATIAL_PATH_OPTIMIZATION_INSUFFICIENT — HISTORICAL_GATE, MECHANISTIC_INTERPRETATION_SUSPENDED_BY_PHASE3D2A`。
+
+### 14.4 Phase 3D.2-A — COMPLETE, STOPPED AFTER AUDIT A
+
+本阶段获授权为 read-only diagnostic：no training、no test、no architecture modification、no reward tuning、no FEPN/NPR/SRM/FOCAL。Audit A 在 8 个固定样本上发现 material prompt mismatch：training 使用 canonical unified authenticity question，TF-PHRASE evaluation 经 `_batch` 默认参数使用 legacy localization question；0/8 raw token sequences 相同，且差异传播到 frozen `[SEG]` hidden 与 mask logits。主门为：
+
+> `GATE_PHASE3D2_IMPLEMENTATION_MISMATCH_FOUND`
+
+按预注册停止条件，没有继续 checkpoint×population、paired bootstrap、soft-mask、subgroup、module-swap 或 representation attribution，也没有修代码、重评、重选 checkpoint 或重训。完整边界见 [Phase 3D.2-A](phase3d2a_spatial_optimization_attribution_audit.md)。
+
+### 14.5 Updated authorization matrix
+
+| 路线 | 截至 2026-08-22 状态 | 重新开启条件 |
+|---|---|---|
+| Phase 3D.0 reward preflight/reformulation | COMPLETED / STOPPED | 新证据 + 新预注册 |
+| Phase 3D.1 policy optimization/reward tuning | COMPLETED / STOPPED | 新证据 + 新明确授权 |
+| Phase 3D.2 direct spatial-path optimization | COMPLETED / INTERPRETATION PAUSED | 先解决 matched protocol；不得自动加预算或重训 |
+| Phase 3D.2-A downstream attribution | STOPPED AFTER AUDIT A | 独立 protocol-resolution 授权 |
+| Phase 3D.2-B matched re-evaluation | COMPLETED / STOPPED | downstream attribution 仍需新明确授权 |
+| matched protocol 下 G0 或 checkpoint promotion | NOT AUTHORIZED | 独立 autonomous-transfer 授权 |
+| FEPN / task-aligned forensic encoder | RESEARCH_HYPOTHESIS_NOT_AUTHORIZED | 独立 task-relevant spatial evidence + 新预注册 |
+| internal test / official1000 final evaluation | SEALED | 最终评估的明确授权 |
+
+### 14.6 Phase 3D.2-B — COMPLETED, READ-ONLY MATCHED RE-EVALUATION
+
+本阶段把 TF-PHRASE evaluator 的唯一变量——user prompt——对齐到 Phase 3D.2 training canonical prompt。8-sample consistency hard gate 为 PASS：token、`[SEG]` index、GT mask、frozen hidden、256D projection、native/postprocessed mask logits 均 exact/numerically identical。
+
+在冻结的 1,106 internal-validation Fake 上，matched mean FG IoU/F1 为：step0 `0.342928/0.452020`；step50 `0.340327/0.449079`；step100 `0.334423/0.440435`；step150 `0.339438/0.446847`；step200 `0.339065/0.445653`；step250 `0.339935/0.446843`。全部训练 checkpoint 的 mean 均低于 step0；step100 的 IoU Δ=`-0.008505`，95% CI `[-0.014516,-0.002637]`，其余 trained-step IoU CI 跨 0。matched-protocol retrospective selector 仍为 step0，且不替换 historical selector。
+
+step0 的 matched−legacy IoU 为 `+0.002105`，95% CI `[+0.000767,+0.003460]`；step250 为 `+0.001391`，95% CI `[-0.000352,+0.003143]`。这是同一模型的 context-sensitive measurement difference，不是模型增益。
+
+最终主门为：
+
+> `GATE_MATCHED_SPATIAL_OPTIMIZATION_NO_VALIDATION_GAIN`
+
+因此 Phase 3D.2 negative validation direction 获得 matched-protocol 支持，但 seen-sample fitting/generalization 机制仍未回答。Phase 3D.2-A downstream attribution 只可另行提出，不自动启动；G0、checkpoint promotion、test、训练与架构修改均未授权。详见 [Phase 3D.2-B](phase3d2b_matched_spatial_path_reevaluation.md)。
+
+
+## Phase 3E — validation-only stopped final report
+
+Phase 3E selector completed before user termination. SFT-CONT selected step 900; JOINT formally fell back to P1 step 0. A separately labeled trained-JOINT step-300 canonical TF-PHRASE diagnostic was completed on validation. Final validation gate: `GATE_JOINT_LANGUAGE_MASK_POSTTRAINING_NOT_SUPPORTED_ON_VALIDATION`. No internal test, official1000, threshold tuning, FEPN, or further post-training search was executed. See `docs/phase3e_joint_language_to_mask_posttraining.md`.
+
+## Phase 3F — Autonomous–Oracle Grounding Distillation
+
+- Final gate: `GATE_AUTONOMOUS_ORACLE_DISTILLATION_NOT_LEARNABLE`.
+- Stage-II AOGD was not supported on internal validation canonical G0.
+- Freeze P1 as the best-supported Stage-I method; stop post-training method search.
+- FEPN is the next major route and requires separate authorization.
+
+## Phase 3G — Raw 4096D AOGD
+
+- AUTHORIZED — FINAL POST-HOC REPRESENTATION TARGET TEST.
+- Motivation is post hoc from Phase 3F sample-level correlations; it was not preregistered before Phase 3F.
+- Phase 3F remains `GATE_AUTONOMOUS_ORACLE_DISTILLATION_NOT_LEARNABLE`.
+
+### Phase 3G terminal addendum — STOPPED AT MANDATORY PREFLIGHT
+
+The 32-Fake preflight preserved the canonical P1, prompt, trajectory, cache, and causal predictor indexing. Oracle advantage, nonzero raw-4096 gap, LoRA gradient connectivity, and frozen-gradient checks passed. However, the preregistered four-sample temporary optimizer step changed mean raw-4096 cosine gap from `0.667825` to `0.668634` (`+0.000809`), rather than decreasing it. The temporary LoRA update was then restored exactly to P1.
+
+Terminal gate:
+
+> `GATE_RAW4096_GRADIENT_DIRECTION_INVALID`
+
+Per the hard stop, formal training, selector, validation checkpoint evaluation, population representation analysis, matched SFT, internal test, and official1000 were not run. Stage-II representation-distillation search is stopped. FEPN is the next main route and remains subject to separate explicit authorization.
+
+## FEPN route authorization addendum — 2026-08-24
+
+FEPN is now the `CURRENT MAIN RESEARCH ROUTE`. Its evidence-first, integration-later living plan is maintained in [fepn_design_route.md](fepn_design_route.md). Current authorization is limited to Phase 4A standalone task-aligned forensic evidence learnability. P1, LLM, SAM and the SEG predictor are not involved; Phase 4B integration, held-out test and official1000 remain unauthorized and sealed.
+
+This route transition is post-hoc to the completed Phase 3 evidence, and does not rewrite the historical gates or metrics of Phase 3B–3G.
+
+
+### Phase 4A — COMPLETE
+
+Standalone FEPN-v0 selected epoch 6. Matched validation Fake FEPN−CLIP mean FG IoU delta was `-0.075590`, paired-bootstrap 95% CI `[-0.085346, -0.065996]`; global Accuracy/ROC-AUC were `0.930832/0.981889`. Terminal gate: `GATE_GLOBAL_ONLY_EVIDENCE_LEARNED`. P1/LLM/SAM integration, Phase 4B, internal test and official1000 were not run. See [Phase 4A report](phase4a_fepn_evidence_learnability.md).
+
+### Phase 4B-G — AUTHORIZED, GLOBAL-ONLY
+
+Phase 4A 的结果驱动了一个不改写历史结论的路线收窄：仅测试冻结 epoch-6 FEPN 的 128D pre-logit global pooled representation 是否能作为四个 continuous evidence tokens 被原始 P1 的 autonomous language pathway 消费。固定比较 P1、PROJ-ONLY 与 PROJ-LORA；只用 canonical language CE，selector primary 为 validation Fake canonical G0 mean FG IoU。dense FEPN、FEPN fine-tuning、SAM fusion、threshold tuning、internal test 与 official1000 均不属于本阶段。完整接口协议见 [Phase 4B-G interface](phase4b_global_fepn_interface.md)。
+
+
+### Phase 4B-G terminal outcome
+
+Final gate: `GATE_GLOBAL_FEPN_NOT_USEFUL_TO_P1`. Selected PROJ-ONLY/PROJ-LORA steps were 1000/500. PROJ-LORA vs P1 validation canonical G0 mean FG IoU delta was `-0.027954`, paired-bootstrap 95% CI `[-0.039136, -0.016378]`. Matched SFT trigger: False; evidence-specific attribution supported: False. No internal test, official1000, threshold tuning, dense FEPN integration, or post-Phase-4B-G experiment was run.

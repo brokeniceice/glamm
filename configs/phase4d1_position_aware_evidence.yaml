@@ -1,0 +1,66 @@
+experiment:
+  name: P4D1-MINIMAL-POSITION-AWARE-EVIDENCE
+  seed: 3407
+  output_root: outputs/phase4d1_position_aware_evidence
+  cache_root: /data/yz/groundingLMM_official/outputs/phase4d1_position_aware_evidence/cache
+  checkpoint_root: /data/yz/groundingLMM_official/checkpoints/phase4d1_position_aware_evidence
+
+phase4c_b:
+  config: configs/phase4c_b_evidence_reader.yaml
+  output_root: outputs/phase4c_b_evidence_reader
+
+phase4c_c:
+  config: configs/phase4c_c_evidence_attribution.yaml
+  output_root: outputs/phase4c_c_evidence_attribution
+  cross_image_mapping: outputs/phase4c_c_evidence_attribution/phase4c_c_image_permutation.json
+  spatial_permutation: outputs/phase4c_c_evidence_attribution/spatial_shuffle_permutation.json
+  clip_evidence: /data/yz/groundingLMM_official/outputs/phase4c_c_evidence_attribution/evidence/clip_reader.pt
+  forensic_evidence: /data/yz/groundingLMM_official/outputs/phase4c_c_evidence_attribution/evidence/forensic_reader.pt
+
+data:
+  eligible_train_fake: 8690
+  train_subset: 2048
+  mask_area_quartiles: 4
+  samples_per_quartile: 512
+  validation_fake: 1106
+  target: official_annotation_derived_per_image_all_reference_union
+
+reader:
+  embed_dim: 256
+  num_heads: 4
+  dropout: 0.0
+  lattice: [24, 24]
+  positional_encoding: fixed_2d_sincos
+  beta_initialization: 0.0
+
+training:
+  optimizer_steps: 512
+  effective_batch_size: 4
+  image_exposures: 2048
+  diagnostic_steps: [0, 64, 128, 256, 384, 512]
+  checkpoint_steps: [0, 256, 512]
+  gradient_clip_norm: 1.0
+  precision: bf16
+  formal_endpoint: 512
+  selector: none
+
+optimizer:
+  name: AdamW
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  scheduler: phase4c_b_frozen_horizon
+  warmup_steps: 1087
+  schedule_total_steps: 21730
+
+loss:
+  bce_weight: 2.0
+  dice_weight: 0.5
+
+evaluation:
+  conditions: [matched, cross_image, spatial_shuffle, zero]
+  threshold_logit: 0.0
+  bootstrap_repeats: 10000
+  bootstrap_seed: 3407
+  nonregression_floor: -0.005
+  sealed: [internal_test, official1000]

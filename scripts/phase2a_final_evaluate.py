@@ -115,7 +115,10 @@ def load_model(config: dict, checkpoint_path: Path, device: torch.device,
         "checkpoint_sha256": file_sha256(checkpoint_path),
         "optimizer_step": int(state["optimizer_step"]),
         "epoch": int(state["epoch"]),
-        "best_val_total_loss": float(state["best_val_total_loss"]),
+        # Post-training checkpoints may be selector-driven and therefore do not
+        # carry a training-loss best value.  It is metadata only and must not
+        # block otherwise compatible frozen evaluation.
+        "best_val_total_loss": float(state.get("best_val_total_loss", float("nan"))),
         "missing_frozen_keys": len(missing),
         "unexpected_keys": len(unexpected),
     }
@@ -230,7 +233,7 @@ def main(argv=None):
         sample_id = sample["sample_id"]
         is_fake = int(sample["cls_label"]) == 1 and bool(sample["seg_valid"])
         if "detection" in requested and sample_id not in completed["detection"]:
-            records, _ = evaluate_detection([sample], backend)
+            records, _ = evaluate_detection([sample], backend, user_prompt="canonical")
             append_records(paths(output_root, "detection")[0], records)
             completed["detection"].add(sample_id)
         if not is_fake:
@@ -263,7 +266,9 @@ def main(argv=None):
             append_records(paths(output_root, "G1")[0], records)
             completed["G1"].add(sample_id)
         if "tf_full_context" in requested and sample_id not in completed["tf_full_context"]:
-            records, _ = evaluate_teacher_forced_full_context([sample], backend)
+            records, _ = evaluate_teacher_forced_full_context(
+                [sample], backend, user_prompt="canonical"
+            )
             append_records(paths(output_root, "tf_full_context")[0], records)
             completed["tf_full_context"].add(sample_id)
         if (index + 1) % 25 == 0:

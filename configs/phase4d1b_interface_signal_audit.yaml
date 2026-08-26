@@ -1,0 +1,39 @@
+experiment:
+  name: P4D1B-INTERFACE-SIGNAL-VIABILITY-AUDIT
+  seed: 3407
+  output_root: outputs/phase4d1b_interface_signal_audit
+
+phase4d1:
+  config: configs/phase4d1_position_aware_evidence.yaml
+  output_root: outputs/phase4d1_position_aware_evidence
+  checkpoint_root: /data/yz/groundingLMM_official/checkpoints/phase4d1_position_aware_evidence
+  cache_root: /data/yz/groundingLMM_official/outputs/phase4d1_position_aware_evidence/cache
+
+population:
+  source: first_256_in_frozen_phase4d1_train_order
+  n: 256
+  gradient_minibatch_n: 4
+
+beta_causality:
+  values: [0.0, 0.0, 0.01, 0.1, 1.0]
+  labels: [zero, current_initialization, plus_0p01, plus_0p1, plus_1p0]
+
+bf16_survival:
+  alpha: [0.0, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0]
+
+control_perturbation:
+  epsilon_over_q_norm: [0.0001, 0.0003, 0.001, 0.003, 0.01, 0.03]
+  direction_seed: 3407
+
+optional_64step:
+  allowed_only_if_tiny_beta_supported: true
+  steps: 64
+  effective_batch_size: 4
+  exposures: 256
+  corrected_beta_rule: smallest_preregistered_alpha_with_pos_forensic_bf16_survival_at_least_0p8
+  corrected_beta_fallback: 1.0
+  diagnostic_steps: [0, 16, 32, 64]
+
+evaluation:
+  threshold_logit: 0.0
+  sealed: [internal_test, official1000]

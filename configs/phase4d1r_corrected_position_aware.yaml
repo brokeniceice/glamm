@@ -1,0 +1,41 @@
+experiment:
+  name: P4D1R-CORRECTED-MINIMAL-POSITION-AWARE-EVIDENCE
+  seed: 3407
+  output_root: outputs/phase4d1r_corrected_position_aware
+  checkpoint_root: /data/yz/groundingLMM_official/checkpoints/phase4d1r_corrected_position_aware
+
+parent_phase4d1:
+  config: configs/phase4d1_position_aware_evidence.yaml
+  output_root: outputs/phase4d1_position_aware_evidence
+  checkpoint_root: /data/yz/groundingLMM_official/checkpoints/phase4d1_position_aware_evidence
+  cache_root: /data/yz/groundingLMM_official/outputs/phase4d1_position_aware_evidence/cache
+  reader_init: /data/yz/groundingLMM_official/checkpoints/phase4d1_position_aware_evidence/reader_init.pt
+
+intervention:
+  only_changed_variable: beta_initialization
+  parent_beta_initialization: 0.0
+  corrected_beta_initialization: 0.03
+  selection_rule: smallest_preregistered_phase4d1b_alpha_with_pos_forensic_bf16_survival_vs_baseline_q_at_least_0p8
+  selected_by_validation_iou: false
+  selected_by_matched_shuffle: false
+  selected_by_binary_mask: false
+
+training:
+  optimizer_steps: 512
+  effective_batch_size: 4
+  image_exposures: 2048
+  diagnostic_steps: [0, 64, 128, 256, 384, 512]
+  checkpoint_steps: [0, 64, 128, 256, 384, 512]
+  gradient_clip_norm: 1.0
+  precision: bf16
+  formal_endpoint: 512
+  selector: none
+
+evaluation:
+  conditions: [matched, cross_image, spatial_shuffle, zero]
+  threshold_logit: 0.0
+  bootstrap_repeats: 10000
+  bootstrap_seed: 3407
+  nonregression_floor: -0.005
+  sealed: [internal_test, official1000]
+

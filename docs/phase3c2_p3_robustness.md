@@ -44,3 +44,17 @@ JPEG70/80 表示 JPEG quality factor；Gaussian5/10 表示 RGB 0–255 像素尺
 - 本阶段只检验当前 P1 上的 B3 对应方案，不重新解释 Phase 2C 的 B0 结果，也不证明 NPR/SRM 具有像素级定位能力。
 
 完整 artifact：`outputs/phase3c2_p3_robustness/`；P3 checkpoint 实体：`/data/yz/groundingLMM_official/checkpoints/phase3c2_p3/p3`。
+
+## 6. Internal test 五条件鲁棒性补充
+
+本补充只使用冻结 internal test（Real 1104 + Fake 1104）。P1/P3 classification 均采用 direct batch=1；P3 仍为 classification-only，因此 canonical G0 只运行P1，P3与P1逐样本完全共享。Original P1 G0直接复用Phase 3A冻结的1104张Fake结果，其余四个扰动重新推理。JPEG与Gaussian定义和official1000鲁棒性实验完全一致。
+
+| 条件 | P1 Acc | P3 Acc | P3−P1 Acc | P1 F1 | P3 F1 | 净纠正 | McNemar p | P1 G0 FG IoU | G0 Δ vs Original |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| original | 0.983696 | 0.982337 | -0.001359 | 0.983621 | 0.982297 | -3 | 0.629059 | 0.166414 | +0.000000 |
+| jpeg70 | 0.948822 | 0.955616 | +0.006793 | 0.950547 | 0.957093 | +15 | 0.0534388 | 0.167208 | +0.000794 |
+| jpeg80 | 0.959239 | 0.964674 | +0.005435 | 0.960492 | 0.965699 | +12 | 0.0652453 | 0.164906 | -0.001507 |
+| gaussian5 | 0.953804 | 0.957880 | +0.004076 | 0.952113 | 0.956399 | +9 | 0.122078 | 0.156419 | -0.009995 |
+| gaussian10 | 0.934783 | 0.940217 | +0.005435 | 0.931429 | 0.937262 | +12 | 0.0961418 | 0.149851 | -0.016563 |
+
+这里的internal direct batch=1结果取代此前仅用于P3训练/快速比较的batch=8 cache绝对值；cache仍用于冻结训练输入与selector，但不作为最终部署式分类数值。P3 canonical G0与P1相等是结构约束，不代表P3获得定位增益。完整配对统计与每个扰动相对Original的bootstrap 95% CI见 `outputs/phase3c2_p3_robustness/robustness_internal/summary.json`。

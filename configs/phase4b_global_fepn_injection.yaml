@@ -1,0 +1,88 @@
+experiment:
+  name: phase4b_global_fepn_injection
+  seed: 3407
+  output_root: outputs/phase4b_global_fepn_injection
+  checkpoint_root: /data/yz/groundingLMM_official/checkpoints/phase4b_global_fepn_injection
+  arms: [P1-FROZEN, PROJ-ONLY, PROJ-LORA]
+source:
+  model_config: configs/phase3a_p1.yaml
+  checkpoint: /data/yz/groundingLMM_official/checkpoints/phase3a_phrase_grounding/p1/best/checkpoint/mp_rank_00_model_states.pt
+  checkpoint_sha256: fa4856f8c173c300050c3ae2149354e63a52bbced762d83fe518e9666136b326
+  optimizer_step: 3500
+  epoch: 7
+fepn:
+  checkpoint: /data/yz/groundingLMM_official/checkpoints/phase4a_fepn_evidence_learnability/epoch_6.pt
+  checkpoint_sha256: ffc2186cb611412e97045cc1049810fe6d9d5f64032fd9c0354a2e0f05b8d637
+  architecture: FEPN-v0
+  frozen: true
+  extraction: dense_features.mean(dim=(2,3)) before global_head
+  feature_dim: 128
+  activation_after_pooling: none
+  normalization_after_pooling: none
+  cache_root: /data/yz/groundingLMM_official/checkpoints/phase4b_global_fepn_injection/fepn_global_cache
+projector:
+  input_dim: 128
+  hidden_dim: 256
+  activation: GELU
+  evidence_tokens: 4
+  llm_dim: 4096
+  placement: after_576_original_visual_embeddings_before_text
+data:
+  manifest_dir: outputs/data_audits/unified_forensics_split_v1
+  datasets_root: datasets
+  synthscars_root: datasets/SynthScars
+  train_count: 17672
+  val_count: 2212
+  target_protocol: phrase_aligned
+prompt:
+  template_id: unified_forensics_v1
+  user_question: Determine whether this image is authentic and explain the forensic evidence.
+  legacy_allowed: false
+training:
+  total_optimizer_steps: 3000
+  batch_size_per_device: 1
+  gradient_accumulation_steps: 4
+  effective_batch_size: 4
+  total_image_exposures: 12000
+  checkpoint_steps: [0, 500, 1000, 1500, 2000, 2500, 3000]
+  precision: bf16
+  gradient_clip_norm: 1.0
+  loss: language_ce_only
+optimizer:
+  name: AdamW
+  projector_lr: 1.0e-4
+  lora_lr: 1.0e-5
+  betas: [0.9, 0.95]
+  weight_decay: 0.0
+  warmup_steps: 150
+  scheduler: linear_warmup_decay
+selector:
+  split: internal_validation
+  baseline_step_0: original_P1_reuse_existing_canonical_validation
+  candidate_steps: [500, 1000, 1500, 2000, 3000]
+  excluded_from_evaluation: [random_projector_initialization_step_0, step_2500]
+  hard_nonregression_margin: 0.005
+  hard_gates: [classification_accuracy, classification_f1, structure_validity, seg_valid_rate]
+  primary: fake_g0_per_image_mean_foreground_iou
+  tie_breakers: [fake_g0_per_image_mean_foreground_f1, phrase_semantic]
+  prohibited: [training_loss, internal_test, official1000, threshold_tuning]
+evaluation:
+  generation_batch_size: 1
+  threshold: 0.0
+  user_prompt: canonical
+  max_new_tokens: 400
+  bootstrap_repeats: 10000
+  bootstrap_seed: 3407
+runtime:
+  cache_gpu: 0
+  PROJ-ONLY_gpu: 0
+  PROJ-LORA_gpu: 1
+prohibited:
+  - internal_test
+  - official1000
+  - threshold_tuning
+  - K_sweep
+  - projector_depth_sweep
+  - fepn_finetuning
+  - dense_fepn_integration
+  - sam_fusion

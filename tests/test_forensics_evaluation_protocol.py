@@ -60,7 +60,7 @@ class RecordingBackend:
         self.result = result
         self.calls = []
 
-    def detection(self, item):
+    def detection(self, item, *, user_prompt="canonical"):
         self.calls.append(("detection", item["sample_id"]))
         return self.result
 
@@ -68,7 +68,7 @@ class RecordingBackend:
         self.calls.append(("generate", item["sample_id"], provide_gt_fake, generation_mode))
         return self.result
 
-    def teacher_forced_localization(self, item, *, context):
+    def teacher_forced_localization(self, item, *, context, user_prompt="canonical"):
         self.calls.append(("teacher", item["sample_id"], context))
         return self.result
 

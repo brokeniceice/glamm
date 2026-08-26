@@ -1,0 +1,33 @@
+experiment:
+  name: P4C-C-IMAGE-SPECIFIC-EVIDENCE-UTILIZATION-ATTRIBUTION
+  seed: 3407
+  output_root: outputs/phase4c_c_evidence_attribution
+  cache_root: /data/yz/groundingLMM_official/outputs/phase4c_c_evidence_attribution
+phase4c_b:
+  config: configs/phase4c_b_evidence_reader.yaml
+  output_root: outputs/phase4c_b_evidence_reader
+  clip_reader_checkpoint: /data/yz/groundingLMM_official/checkpoints/phase4c_b_evidence_reader/clip_reader/selected.pt
+  clip_reader_sha256: 5905703200b3cfe9cd9f2bf90c243d271a8deed779b0bc28df8fa3e490f85fd2
+  forensic_reader_checkpoint: /data/yz/groundingLMM_official/checkpoints/phase4c_b_evidence_reader/forensic_reader/selected.pt
+  forensic_reader_sha256: e6b807a24e25bfa3a800a637f184521367424bcea03b099836b54cf48f047296
+phase3c0:
+  paired_conditions: outputs/phase3c0_residual_diagnosis/paired/paired_conditions.jsonl
+population:
+  full_validation_fake: 1106
+  g0_valid_seg: 1078
+  common_four_query_eligible: 1076
+  protocol: full_1106_baseline_reproduction_then_common_1076_intervention
+queries: [G0, phrase_repair, phrase_only, tf_full_context]
+conditions: [matched, cross_image, spatial_shuffle, global_repeat, zero]
+statistics:
+  bootstrap_repeats: 10000
+  bootstrap_seed: 3407
+  confidence: 0.95
+  wilcoxon_zero_method: wilcox
+  multiple_testing: holm
+evaluation:
+  threshold_logit: 0.0
+  spatial_tokens: 576
+  spatial_hw: [24, 24]
+  sealed: [internal_test, official1000]
+optional_controls_not_run: [cross_image_same_class, per_image_shuffle, dataset_mean_evidence]

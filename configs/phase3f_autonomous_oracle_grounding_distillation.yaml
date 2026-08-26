@@ -1,0 +1,104 @@
+experiment:
+  name: phase3f_autonomous_oracle_grounding_distillation
+  seed: 3407
+  output_root: outputs/phase3f_autonomous_oracle_grounding_distillation
+  checkpoint_root: /data/yz/groundingLMM_official/checkpoints/phase3f_autonomous_oracle_grounding_distillation
+source:
+  model_config: configs/phase3a_p1.yaml
+  checkpoint: /data/yz/groundingLMM_official/checkpoints/phase3a_phrase_grounding/p1/best/checkpoint/mp_rank_00_model_states.pt
+  checkpoint_sha256: fa4856f8c173c300050c3ae2149354e63a52bbced762d83fe518e9666136b326
+  optimizer_step: 3500
+  epoch: 7
+matched_sft_control:
+  checkpoint: /data/yz/groundingLMM_official/checkpoints/phase3e_joint_language_mask_posttraining/SFT_CONT/step_0900/checkpoint/mp_rank_00_model_states.pt
+  checkpoint_sha256: 2e8b7769b1cdf65d83aeb878b9ef2ac233f349e3d2217e369e6314d0a54fbe78
+  selected_step: 900
+  phase3e_config: configs/phase3e_joint_language_mask_posttraining.yaml
+  phase3e_schedule: outputs/phase3e_joint_language_mask_posttraining/training/schedule.json
+  schedule_sha256_field: 31dded53f2fa9f64dd3104d5063d94c96521b00900412c8b3212fcb552114e11
+  exact_match_scope_optimizer_steps: 1000
+  reuse_decision_after_4500_step_amendment: defer_matched_p3f_sft_until_aogd_beats_p1_on_validation
+data:
+  manifest_dir: outputs/data_audits/unified_forensics_split_v1
+  datasets_root: datasets
+  synthscars_root: datasets/SynthScars
+  train_split: train
+  selector_split: val
+  target_protocol: phrase_aligned
+  mask_provenance: frozen_synthscars_annotation_polygons_per_image_all_ref_union
+prompt:
+  template_id: unified_forensics_v1
+  user_question: Determine whether this image is authentic and explain the forensic evidence.
+  legacy_localization_question_allowed: false
+rollout:
+  protocol: frozen_off_policy_p1_canonical_g0_batch1
+  phase3b_cache: outputs/phase3b_generated_replay/cache/train_fake_p1_g0.jsonl
+  phase3b_manifest: outputs/phase3b_generated_replay/cache/cache_manifest.json
+  cache_sha256: 6ab4c428748e426132edaf6570ee38f12bbc8c1a2e0d44b089152563fd0990ed
+  minimum_eligible_rate: 0.95
+  refresh_steps: []
+teacher:
+  checkpoint_role: frozen_p1
+  trajectory: authoritative_full_canonical_tf
+  stop_gradient: true
+student:
+  initialization: canonical_p1
+  trajectory: frozen_p1_autonomous_fixed_token_replay
+  trainable: [lora]
+  frozen: [llm_base, token_embedding, lm_head, classification_head, vision_tower, grounding_image_encoder, mm_projector, region_encoder, text_hidden_fcs, mask_decoder]
+  lora_rank: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  lora_target_modules: [q_proj, v_proj]
+loss:
+  language_ce_weight: 1.0
+  representation_weight: 1.0
+  representation: projected_256d_cosine
+  classification_weight: 0.0
+  mask_bce_weight: 0.0
+  mask_dice_weight: 0.0
+  reward: null
+  kl: null
+optimizer:
+  name: AdamW
+  lora_lr: 1.0e-5
+  betas: [0.9, 0.95]
+  weight_decay: 0.0
+  scheduler: linear_warmup_decay
+  warmup_steps: 100
+training:
+  total_optimizer_steps: 4500
+  checkpoint_interval: 100
+  batch_size_per_device: 1
+  gradient_accumulation_steps: 4
+  effective_batch_size: 4
+  total_image_exposures: 18000
+  schedule: phase3e_exact_4000_prefix_then_full_population_coverage_then_328_deterministic_repeats
+  precision: bf16
+  gradient_clip_norm: 1.0
+  workers: 0
+preflight:
+  fake_count: 32
+  gate_on_failure: GATE_AOGD_GRADIENT_PATH_NOT_FUNCTIONAL
+selector:
+  split: internal_validation
+  primary: fake_g0_per_image_mean_foreground_iou
+  tie_breaker: fake_g0_per_image_mean_foreground_f1
+  candidate_steps: [0, 500, 1000, 2000, 3000, 4000, 4500]
+  classification_accuracy_max_drop: 0.005
+  classification_f1_max_drop: 0.005
+  structure_validity_max_drop: 0.005
+  prohibited: [training_loss, tf_phrase_alone, internal_test, official1000, reward, qualitative]
+evaluation:
+  g0_generation_batch_size: 1
+  detection_generation_batch_size: 1
+  tf_user_prompt: canonical
+  generation_strategy: greedy
+  max_new_tokens: 400
+  mask_logit_threshold: 0.0
+  bootstrap_repeats: 10000
+  bootstrap_seed: 3407
+runtime:
+  physical_gpu: 0
+  sft_control_gpu: 2
+  pytorch_cuda_alloc_conf: max_split_size_mb:512

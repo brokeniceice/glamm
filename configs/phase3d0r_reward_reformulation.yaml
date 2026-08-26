@@ -1,0 +1,44 @@
+experiment:
+  name: phase3d0r_reward_reformulation
+  seed: 3407
+  output_root: outputs/phase3d0r_reward_reformulation
+  source_root: outputs/phase3d0_reward_preflight
+  manifest_dir: outputs/data_audits/unified_forensics_split_v1
+source:
+  checkpoint_sha256: fa4856f8c173c300050c3ae2149354e63a52bbced762d83fe518e9666136b326
+  sampling: {temperature: 0.8, top_p: 0.95, K: 8}
+data:
+  datasets_root: datasets
+  synthscars_root: datasets/SynthScars
+semantic_encoder:
+  model_id: sentence-transformers/all-MiniLM-L6-v2
+  revision: 1110a243fdf4706b3f48f1d95db1a4f5529b4d41
+  cache_dir: /data/yz/groundingLMM_official/outputs/phase3d0r_reward_reformulation/semantic_encoder/hf_cache
+  pooling: attention_masked_mean_then_l2_normalize
+phrase:
+  key_soft_weight: 0.65
+  sentence_sem_weight: 0.35
+  contradiction_multiplier: 0.50
+  spatial_weight_multiplier: 2.0
+grounding:
+  range_scale: 0.10
+  ceiling_scale: 0.30
+reward:
+  Q1:
+    fake: {R_cls: 0.25, R_struct: 0.10, R_phrase_sem: 0.65}
+    real: {R_cls: 0.75, R_struct: 0.25}
+  Q2:
+    fake: {R_cls: 0.25, R_struct: 0.10, R_phrase_sem: 0.55, R_ground_rel: 0.10}
+    real: {R_cls: 0.75, R_struct: 0.25}
+  Q3:
+    fake: {R_cls: 0.25, R_struct: 0.10, R_phrase_sem: 0.45, R_ground_rel: 0.20}
+    real: {R_cls: 0.75, R_struct: 0.25}
+gate:
+  groups_multiple_unique_min: 0.50
+  fake_reward_std_gt_005_min: 0.50
+  nonregression_tolerance: 0.005
+  phrase_sem_q2_vs_q1_tolerance: 0.02
+  low_controllability: 0.25
+  high_controllability: 0.75
+  phrase_good: 0.70
+  mask_poor: 0.20

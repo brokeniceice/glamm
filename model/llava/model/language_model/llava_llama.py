@@ -65,6 +65,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         output_hidden_states: Optional[bool] = None,
         images: Optional[torch.FloatTensor] = None,
         bboxes: Optional[List[torch.FloatTensor]] = None,
+        forensic_evidence_tokens: Optional[torch.FloatTensor] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = (
@@ -88,7 +89,8 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             inputs_embeds,
             labels,
         ) = self.prepare_inputs_labels_for_multimodal(
-            input_ids, attention_mask, past_key_values, labels, images, bboxes
+            input_ids, attention_mask, past_key_values, labels, images, bboxes,
+            forensic_evidence_tokens=forensic_evidence_tokens,
         )
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
 
@@ -148,6 +150,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         inputs_embeds=None,
         images=None,
         bboxes=None,
+        forensic_evidence_tokens=None,
         **kwargs
     ):
         if past_key_values:
@@ -165,7 +168,8 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 "use_cache": kwargs.get("use_cache"),
                 "attention_mask": attention_mask,
                 "images": images,
-                "bboxes" : bboxes
+                "bboxes": bboxes,
+                "forensic_evidence_tokens": forensic_evidence_tokens,
             }
         )
         return model_inputs

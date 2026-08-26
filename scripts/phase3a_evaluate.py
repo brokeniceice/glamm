@@ -27,8 +27,10 @@ from eval.forensics import (
 )
 from eval.forensics_eval import GLaMMForensicsBackend
 from eval.phase3a_metrics import parse_phrase_aligned_generation, validate_prediction_record
+from model.fepn import ForensicEvidenceProjector
 from model.llava import conversation as conversation_lib
 from scripts.phase2a_final_evaluate import file_sha256, load_model
+from tools.phase4b import FrozenFeatureStore
 
 
 MODES = ("detection", "G0", "tf_full_context", "phrase_only")
@@ -51,6 +53,17 @@ def parse_args(argv=None):
     parser.add_argument("--reset", action="store_true")
     parser.add_argument("--skip-spatial-save", action="store_true",
                         help="Keep exact metrics but omit logits/binary tensors (validation selector only).")
+    parser.add_argument("--tf-user-prompt", choices=("legacy", "canonical"), default="canonical",
+                        help="User instruction for teacher-forced modes; canonical is the formal default.")
+    parser.add_argument("--detection-user-prompt", choices=("legacy", "canonical"), default="canonical",
+                        help="User instruction for detection; canonical is the formal default.")
+    parser.add_argument("--include-soft-mask-diagnostics", action="store_true",
+                        help="Record threshold-free mask diagnostics without changing formal binary metrics.")
+    parser.add_argument("--forensic-feature-cache", default=None,
+                        help="Optional Phase 4B-G sample-keyed frozen FEPN feature cache.")
+    parser.add_argument("--forensic-feature-cache-sha256", default=None)
+    parser.add_argument("--forensic-projector-checkpoint", default=None,
+                        help="Checkpoint containing the frozen Phase 4B-G projector state.")
     return parser.parse_args(argv)
 
 
@@ -89,6 +102,7 @@ def _union_logits(pred_mask: torch.Tensor | None, shape: tuple[int, int]) -> tor
 
 def preserve_spatial_prediction(
     root: Path, mode: str, sample: dict, output: dict, record: dict, *, save_spatial: bool = True,
+    soft_diagnostics: bool = False,
 ) -> dict:
     gt = torch.as_tensor(sample["masks"]).bool().any(dim=0).cpu()
     logits = _union_logits(output.get("pred_mask"), tuple(gt.shape))
@@ -119,7 +133,34 @@ def preserve_spatial_prediction(
         "background_iou": bg_iou,
         "fg_bg_miou": (fg_iou + bg_iou) / 2,
         "mask_logit_threshold": MASK_LOGIT_THRESHOLD,
+        "gt_foreground_pixels": int(gt.sum()),
+        "gt_mask_area_ratio": float(gt.float().mean()),
+        "num_official_refs": len((sample.get("manifest_row") or {}).get("refs") or []),
     })
+    if soft_diagnostics:
+        probability = union_logits.sigmoid()
+        target = gt.float()
+        soft_intersection = (probability * target).sum()
+        soft_dice_denominator = probability.sum() + target.sum()
+        soft_iou_denominator = probability.sum() + target.sum() - soft_intersection
+        foreground_probability = probability[gt]
+        background_probability = probability[~gt]
+        foreground_logit = union_logits[gt]
+        background_logit = union_logits[~gt]
+        record["soft_mask"] = {
+            "binary_cross_entropy": float(torch.nn.functional.binary_cross_entropy_with_logits(
+                union_logits, target, reduction="mean"
+            )),
+            "soft_dice": float((2 * soft_intersection + 1e-6) / (soft_dice_denominator + 1e-6)),
+            "soft_iou": float((soft_intersection + 1e-6) / (soft_iou_denominator + 1e-6)),
+            "mean_probability_foreground": float(foreground_probability.mean()),
+            "mean_probability_background": float(background_probability.mean()),
+            "foreground_background_probability_margin": float(
+                foreground_probability.mean() - background_probability.mean()
+            ),
+            "mean_logit_foreground": float(foreground_logit.mean()),
+            "mean_logit_background": float(background_logit.mean()),
+        }
     if mode == "G0":
         parsed = parse_phrase_aligned_generation(output.get("generated_text") or "")
         record["generated_localization_phrase"] = parsed["target_region"]
@@ -182,9 +223,29 @@ def main(argv=None):
         config, checkpoint_path, device,
         expected_step=cli.expected_step, expected_epoch=cli.expected_epoch,
     )
+    evidence_provider = None
+    if cli.forensic_feature_cache or cli.forensic_projector_checkpoint:
+        if not (cli.forensic_feature_cache and cli.forensic_projector_checkpoint):
+            raise ValueError("Phase 4B-G evaluation requires both cache and projector checkpoint")
+        feature_store = FrozenFeatureStore(
+            Path(cli.forensic_feature_cache).resolve(),
+            expected_sha256=cli.forensic_feature_cache_sha256,
+        )
+        projector_state = torch.load(Path(cli.forensic_projector_checkpoint).resolve(), map_location="cpu")
+        projector = ForensicEvidenceProjector(128, 256, 4, 4096)
+        projector.load_state_dict(projector_state["projector"], strict=True)
+        projector.to(device=device, dtype=torch.bfloat16).eval().requires_grad_(False)
+        model.forensic_evidence_token_count = 4
+        def evidence_provider(samples):
+            features = feature_store.get(
+                [str(sample["sample_id"]) for sample in samples], device=device, dtype=torch.bfloat16
+            )
+            with torch.no_grad():
+                return projector(features)
     backend = GLaMMForensicsBackend(
         model, tokenizer, device=device, dtype=torch.bfloat16, use_mm_start_end=True,
         max_new_tokens=int(config["evaluation"]["max_new_tokens"]),
+        forensic_evidence_provider=evidence_provider,
     )
     manifest_dir = (
         Path(cli.manifest_dir).resolve()
@@ -228,6 +289,7 @@ def main(argv=None):
                 record = preserve_spatial_prediction(
                     output_root, "G0", sample, output, record,
                     save_spatial=not cli.skip_spatial_save,
+                    soft_diagnostics=cli.include_soft_mask_diagnostics,
                 )
                 append_jsonl(output_root / "G0" / "predictions.jsonl", record)
             print(f"phase3a-G0 {min(start + batch_size, len(fake_indices))}/{len(fake_indices)}", flush=True)
@@ -236,12 +298,14 @@ def main(argv=None):
         sample = dataset[index]
         sample_id = sample["sample_id"]
         if "detection" in requested and sample_id not in completed["detection"]:
-            records, _ = evaluate_detection([sample], backend)
+            records, _ = evaluate_detection([sample], backend, user_prompt=cli.detection_user_prompt)
             append_jsonl(output_root / "detection" / "predictions.jsonl", records[0])
         if not (int(sample["cls_label"]) == 1 and bool(sample["seg_valid"])):
             continue
         if "tf_full_context" in requested and sample_id not in completed["tf_full_context"]:
-            output = backend.teacher_forced_localization(sample, context="full")
+            output = backend.teacher_forced_localization(
+                sample, context="full", user_prompt=cli.tf_user_prompt
+            )
             record = _localization_record(
                 sample, output, "tf_full_context", uses_gt_authenticity=True,
                 uses_gt_explanation=True, classification_gate=False,
@@ -249,6 +313,7 @@ def main(argv=None):
             record = preserve_spatial_prediction(
                 output_root, "tf_full_context", sample, output, record,
                 save_spatial=not cli.skip_spatial_save,
+                soft_diagnostics=cli.include_soft_mask_diagnostics,
             )
             append_jsonl(output_root / "tf_full_context" / "predictions.jsonl", record)
         if "phrase_only" in requested and sample_id not in completed["phrase_only"]:
@@ -263,6 +328,7 @@ def main(argv=None):
             record = preserve_spatial_prediction(
                 output_root, "phrase_only", sample, output, record,
                 save_spatial=not cli.skip_spatial_save,
+                soft_diagnostics=cli.include_soft_mask_diagnostics,
             )
             append_jsonl(output_root / "phrase_only" / "predictions.jsonl", record)
         if (index + 1) % 25 == 0:
@@ -275,6 +341,12 @@ def main(argv=None):
         "manifest_dir": str(manifest_dir),
         "test_samples": limit,
         "seed": cli.seed,
+        "tf_user_prompt": cli.tf_user_prompt,
+        "detection_user_prompt": cli.detection_user_prompt,
+        "soft_mask_diagnostics_included": cli.include_soft_mask_diagnostics,
+        "forensic_evidence_enabled": evidence_provider is not None,
+        "forensic_feature_cache": cli.forensic_feature_cache,
+        "forensic_projector_checkpoint": cli.forensic_projector_checkpoint,
         "generation": {
             "do_sample": False, "num_beams": 1,
             "max_new_tokens": int(config["evaluation"]["max_new_tokens"]),

@@ -1,0 +1,89 @@
+experiment:
+  name: phase4a_fepn_evidence_learnability
+  seed: 3407
+  output_root: outputs/phase4a_fepn_evidence_learnability
+  checkpoint_root: /data/yz/groundingLMM_official/checkpoints/phase4a_fepn_evidence_learnability
+  gpu: 0
+data:
+  manifest_dir: outputs/data_audits/unified_forensics_split_v1
+  datasets_root: datasets
+  synthscars_root: datasets/SynthScars
+  train_manifest_sha256: 3a5cd7040ee9ae5b7c8e6cf6cc5f225441d95849984c9ce6ed9abfa07f9f63bc
+  val_manifest_sha256: deb751692b7f13b681e4c5ad9476ed4ed3b7354229bb80af9e673ba1c47b8889
+  train_total: 17672
+  train_real: 8836
+  train_fake: 8836
+  val_total: 2212
+  val_real: 1106
+  val_fake: 1106
+  target: official_annotation_derived_per_image_all_ref_union_evidence_region
+  dense_supervision: fake_only
+preprocess:
+  source: openai/clip-vit-large-patch14-336
+  geometry: CLIPImageProcessor-ResizeShortest336-CenterCrop336-Rescale-Normalize:v1
+  input_resolution: 336
+  image_mean: [0.48145466, 0.4578275, 0.40821073]
+  image_std: [0.26862954, 0.26130258, 0.27577711]
+  residual_operator: fixed_depthwise_laplacian_3x3_on_denormalized_rgb
+architecture:
+  name: FEPN-v0
+  rgb_stem_channels: [32, 64]
+  residual_stem_channels: [32, 64]
+  fusion_channels: 96
+  pyramid_channels: [96, 128, 192]
+  dense_channels: 128
+  dense_resolution: [84, 84]
+  parameter_limit: 50000000
+loss:
+  global: binary_cross_entropy_with_logits
+  dense: 2.0*BCE+0.5*Dice
+  lambda_global: 1.0
+  lambda_dense: 1.0
+  dense_fake_only: true
+training:
+  max_epochs: 10
+  batch_size: 16
+  real_per_full_batch: 8
+  fake_per_full_batch: 8
+  steps_per_epoch: 1105
+  total_steps: 11050
+  image_exposures: 176720
+  num_workers: 8
+  precision: bf16
+  gradient_clip_norm: 1.0
+  formal_checkpoint_epochs: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  early_stopping: false
+  safety_stop_only: [NaN_or_nonfinite, gradient_explosion, implementation_failure, severe_collapse]
+optimizer:
+  name: AdamW
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  scheduler: linear_warmup_cosine_decay
+  warmup_fraction: 0.05
+  warmup_steps: 553
+evaluation:
+  mask_logit_threshold: 0.0
+  selector_primary: validation_fake_mean_foreground_iou
+  selector_tie_break: validation_fake_mean_foreground_f1
+  global_safety_accuracy_min: 0.60
+  global_safety_roc_auc_min: 0.60
+  bootstrap_repeats: 10000
+  bootstrap_seed: 3407
+baseline:
+  name: matched_frozen_clip_spatial_probe
+  checkpoint: outputs/phase3c1_spatial_probe/probes/clip/selected.pt
+  checkpoint_sha256: 28d1fff92c6870b157b3f22e8efc7ad4c46a7cdcca3c76f120b9ce61a08b694b
+  predictions: outputs/phase3c1_spatial_probe/validation/clip/normal_predictions.jsonl
+  predictions_sha256: 540e1bf76b32dd312fb9819fcffa7821757b5d75f1f7289e6fa186f459dff510
+  low_res_logits: outputs/phase3c1_spatial_probe/validation/clip/selected_low_res_logits.pt
+  threshold_tuned: false
+prohibited:
+  - internal_test
+  - official1000
+  - threshold_tuning
+  - P1_integration
+  - LLM_integration
+  - SAM_integration
+  - Phase4B
+  - architecture_sweep

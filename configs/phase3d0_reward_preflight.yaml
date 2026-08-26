@@ -1,0 +1,56 @@
+experiment:
+  name: phase3d0_reward_preflight
+  seed: 3407
+  output_root: outputs/phase3d0_reward_preflight
+  tensor_root: /data/yz/groundingLMM_official/outputs/phase3d0_reward_preflight
+source:
+  selector: outputs/phase3a_phrase_grounding/selection/p1_selector.json
+  checkpoint_sha256: fa4856f8c173c300050c3ae2149354e63a52bbced762d83fe518e9666136b326
+  optimizer_step: 3500
+  epoch: 7
+data:
+  manifest_dir: outputs/data_audits/unified_forensics_split_v1
+  datasets_root: datasets
+  synthscars_root: datasets/SynthScars
+  reward_dev: {real: 512, fake: 512}
+  validation: {real: 1106, fake: 1106}
+sampling:
+  K: 8
+  max_new_tokens: 400
+  settings:
+    A: {do_sample: true, temperature: 0.8, top_p: 0.95}
+    B: {do_sample: true, temperature: 1.0, top_p: 0.95}
+  selection_inputs:
+    - group_normalized_text_diversity
+    - unique_phrase_diversity
+    - usable_structural_validity_rate
+    - reward_independent_generation_stability
+  structural_validity_tolerance_absolute: 0.05
+  max_length_hit_rate_max: 0.05
+reward:
+  eps: 1.0e-8
+  candidates:
+    R0: MASK_ONLY_CONTROL
+    R1: PHRASE_ONLY_CONTROL
+    R2: ADDITIVE_EVIDENCE
+    R3: JOINT_EVIDENCE
+  fake_weights:
+    R2: {R_cls: 0.20, R_struct: 0.10, R_phrase_lex: 0.30, R_mask: 0.40}
+    R3: {R_cls: 0.20, R_struct: 0.10, R_phrase_lex: 0.20, R_mask: 0.30, R_align: 0.20}
+  real_weights:
+    R2: {R_cls: 0.70, R_struct: 0.30}
+    R3: {R_cls: 0.70, R_struct: 0.30}
+evaluation:
+  mask_logit_threshold: 0.0
+  bootstrap_repeats: 10000
+  bootstrap_seed: 3407
+gate:
+  fraction_groups_multiple_unique_min: 0.50
+  fraction_fake_selected_reward_std_gt_005_min: 0.50
+  pareto_correct_ranking_min: 0.90
+  generated_verdict_regression_max: 0.005
+  structural_validity_regression_max: 0.005
+  stable_positive_evidence: bootstrap_95ci_lower_gt_0_for_phrase_or_mask
+  collapse_mean_regression_min: -0.005
+  collapse_requires_bootstrap_95ci_upper_lt_0: true
+  mask_only_not_worse_tolerance: 0.01

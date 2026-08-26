@@ -47,7 +47,9 @@ def snapshot(backend, sample):
     g0 = backend.generate_localization(sample, provide_gt_fake=False, generation_mode="unified_fake_generate")
     g1 = backend.generate_localization(sample, provide_gt_fake=True,
                                        generation_mode="unified_prompt_gt_fake_prefix")
-    tf = backend.teacher_forced_localization(sample, context="full")
+    tf = backend.teacher_forced_localization(
+        sample, context="full", user_prompt="canonical"
+    )
     return {
         "lm_token_logits": lm_logits[0],
         "base_logits": detection["cls_logits"].detach().cpu(),

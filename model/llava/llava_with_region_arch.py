@@ -81,7 +81,8 @@ class LlavaMetaForCausalLM(ABC):
         return image_features, image_forward_outs
 
     def prepare_inputs_labels_for_multimodal(
-        self, input_ids, attention_mask, past_key_values, labels, images, bboxes
+        self, input_ids, attention_mask, past_key_values, labels, images, bboxes,
+        forensic_evidence_tokens=None,
     ):
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
@@ -126,6 +127,11 @@ class LlavaMetaForCausalLM(ABC):
         new_input_embeds = []
         new_labels = [] if labels is not None else None
         cur_image_idx = 0
+        if forensic_evidence_tokens is not None:
+            if forensic_evidence_tokens.ndim != 3 or forensic_evidence_tokens.shape[0] != input_ids.shape[0]:
+                raise ValueError("forensic_evidence_tokens must be [B,K,H] and match input batch")
+            if forensic_evidence_tokens.shape[2] != self.config.hidden_size:
+                raise ValueError("forensic evidence hidden dimension mismatch")
         for batch_idx, (cur_input_ids, reg_feat) in enumerate(zip(input_ids, mlvl_reg_features)): # Adjusted the loop to include reg_feat
             curr_full_input_ids = []
             if (cur_input_ids == IMAGE_TOKEN_INDEX).sum() == 0:
@@ -143,6 +149,8 @@ class LlavaMetaForCausalLM(ABC):
                 cur_image_idx += 1
                 continue
             image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
+            if forensic_evidence_tokens is not None and image_token_indices.numel() != 1:
+                raise ValueError("Phase 4B-G evidence injection requires exactly one image token per sequence")
             cur_new_input_embeds = []
             if labels is not None:
                 cur_labels = labels[batch_idx]
@@ -150,6 +158,11 @@ class LlavaMetaForCausalLM(ABC):
                 assert cur_labels.shape == cur_input_ids.shape
             while image_token_indices.numel() > 0:
                 cur_image_features = image_features[cur_image_idx]
+                if forensic_evidence_tokens is not None:
+                    evidence = forensic_evidence_tokens[batch_idx].to(
+                        device=cur_image_features.device, dtype=cur_image_features.dtype
+                    )
+                    cur_image_features = torch.cat((cur_image_features, evidence), dim=0)
                 image_token_start = image_token_indices[0]
                 if getattr(self.config, "tune_mm_mlp_adapter", False) and getattr(
                     self.config, "mm_use_im_start_end", False

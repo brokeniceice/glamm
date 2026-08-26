@@ -1,0 +1,73 @@
+experiment:
+  name: phase3d2_direct_spatial_path
+  seed: 3407
+  output_root: outputs/phase3d2_direct_spatial_path
+  checkpoint_root: /data/yz/groundingLMM_official/checkpoints/phase3d2_direct_spatial_path
+  arms: [P1-FROZEN, P3D2-SPATIAL]
+  forbidden_arms: [R3, Q2, RSFT, generated_replay, architecture_fusion]
+source:
+  model_config: configs/phase3a_p1.yaml
+  selector: outputs/phase3a_phrase_grounding/selection/p1_selector.json
+  checkpoint: /data/yz/groundingLMM_official/checkpoints/phase3a_phrase_grounding/p1/best/checkpoint/mp_rank_00_model_states.pt
+  checkpoint_sha256: fa4856f8c173c300050c3ae2149354e63a52bbced762d83fe518e9666136b326
+  optimizer_step: 3500
+  epoch: 7
+data:
+  manifest_dir: outputs/data_audits/unified_forensics_split_v1
+  datasets_root: datasets
+  synthscars_root: datasets/SynthScars
+  train_split: train
+  selector_split: val
+  target_protocol: phrase_aligned
+  training_domain: fake_only
+  target_construction: per_image_all_ref_union
+  mask_provenance: frozen_synthscars_annotation_polygons
+trainable:
+  allowed: [text_hidden_fcs, mask_decoder]
+  all_other_parameters_frozen: true
+loss:
+  objective: direct_mask_supervision_only
+  mask_bce_weight: 2.0
+  mask_dice_weight: 0.5
+  fake_only: true
+  language_ce: 0.0
+  classification: 0.0
+  reward: null
+optimizer:
+  name: AdamW
+  learning_rate: 3.0e-4
+  betas: [0.9, 0.95]
+  weight_decay: 0.0
+  scheduler: linear_warmup_decay
+  warmup_steps: 10
+training:
+  total_optimizer_steps: 250
+  checkpoint_interval: 50
+  batch_size_per_device: 4
+  gradient_accumulation_steps: 1
+  effective_batch_size: 4
+  total_fake_image_exposures: 1000
+  precision: bf16
+  gradient_clip_norm: 1.0
+  gradient_audit_steps: [1, 150, 250]
+selector:
+  primary: internal_validation_fake_tf_phrase_mean_foreground_iou
+  tie_breaker: internal_validation_fake_tf_phrase_mean_foreground_f1
+  candidate_steps: [0, 50, 100, 150, 200, 250]
+  prohibited: [training_loss, G0, internal_test, official1000, reward, qualitative]
+evaluation:
+  primary_mode: tf_full_context
+  deployment_mode: G0
+  generation_strategy: greedy
+  generation_batch_size: 8
+  max_new_tokens: 400
+  mask_logit_threshold: 0.0
+  bootstrap_repeats: 10000
+  bootstrap_seed: 3407
+audit:
+  deterministic_sample_count: 16
+  exact_language_behavior_required: true
+runtime:
+  training_gpu: 1
+  evaluation_gpus: [1, 2]
+  preserve_cuda_cache: true

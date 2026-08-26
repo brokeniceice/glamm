@@ -82,7 +82,9 @@ def main():
         sample = dataset[index_by_id[sample_id]]
         g0 = backend.generate_localization(sample, provide_gt_fake=False, generation_mode="unified_fake_generate")
         g1 = backend.generate_localization(sample, provide_gt_fake=True, generation_mode="unified_prompt_gt_fake_prefix")
-        tf = backend.teacher_forced_localization(sample, context="full")
+        tf = backend.teacher_forced_localization(
+            sample, context="full", user_prompt="canonical"
+        )
         image = Image.open(sample["image_path"]).convert("RGB")
         height, width = image.height, image.width
         gt_mask = torch.as_tensor(sample["masks"]).bool().any(dim=0).numpy()

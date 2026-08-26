@@ -86,13 +86,30 @@ class _LimitedDataset:
 class GLaMMForensicsBackend:
     """Translate explicit protocol contexts into GLaMM forward/generate calls."""
 
-    def __init__(self, model, tokenizer, *, device, dtype, use_mm_start_end=True, max_new_tokens=256):
+    def __init__(self, model, tokenizer, *, device, dtype, use_mm_start_end=True, max_new_tokens=256,
+                 forensic_evidence_provider=None):
         self.model = model
         self.tokenizer = tokenizer
         self.device = torch.device(device)
         self.dtype = dtype
         self.use_mm_start_end = use_mm_start_end
         self.max_new_tokens = max_new_tokens
+        self.forensic_evidence_provider = forensic_evidence_provider
+
+    def _forensic_evidence_tokens(self, samples):
+        """Return optional continuous evidence tokens without changing raw token IDs."""
+        provider = getattr(self, "forensic_evidence_provider", None)
+        if provider is None:
+            return None
+        tokens = provider(list(samples))
+        if tokens is None or tokens.ndim != 3 or tokens.shape[0] != len(samples):
+            raise ValueError("forensic evidence provider must return [B,K,H]")
+        return tokens.to(device=self.device, dtype=self.dtype)
+
+    def _model_forward_with_optional_evidence(self, batch, evidence_tokens):
+        if evidence_tokens is None:
+            return self.model.model_forward(**batch)
+        return self.model.model_forward(**batch, forensic_evidence_tokens=evidence_tokens)
 
     @staticmethod
     def _prediction_fields(output: Mapping[str, Any], index=0) -> dict[str, Any]:
@@ -178,11 +195,16 @@ class GLaMMForensicsBackend:
             continue_assistant=continue_assistant,
         )
         original_sizes = [tuple(label.shape) for label in batch["label_list"]]
+        evidence_tokens = self._forensic_evidence_tokens(samples)
         with torch.no_grad():
+            evaluation_kwargs = {}
+            if evidence_tokens is not None:
+                evaluation_kwargs["forensic_evidence_tokens"] = evidence_tokens
             sequences, pred_masks, cls_output, details = self.model.evaluate(
                 batch["global_enc_images"], batch["grounding_enc_images"], batch["input_ids"],
                 batch["resize_list"], original_sizes, max_tokens_new=self.max_new_tokens,
                 bboxes=batch["bboxes"], force_cls_token=False, return_generation_details=True,
+                **evaluation_kwargs,
             )
         prompt_length = batch["input_ids"].shape[1]
         eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
@@ -263,10 +285,12 @@ class GLaMMForensicsBackend:
             results.append(result)
         return results
 
-    def _causal_forward(self, sample: Mapping[str, Any], assistant_content: str):
-        batch = self._batch(sample, assistant_content)
+    def _causal_forward(self, sample: Mapping[str, Any], assistant_content: str, *,
+                        question: str = FORENSICS_QUESTION):
+        batch = self._batch(sample, assistant_content, question=question)
+        evidence_tokens = self._forensic_evidence_tokens([sample])
         with torch.no_grad():
-            output = self.model.model_forward(**batch)
+            output = self._model_forward_with_optional_evidence(batch, evidence_tokens)
         return batch, output
 
     @staticmethod
@@ -293,13 +317,17 @@ class GLaMMForensicsBackend:
             f"{cls.authoritative_phrase(sample)} [SEG]"
         )
 
-    def detection(self, sample: Mapping[str, Any]) -> Mapping[str, Any]:
-        batch = self._batch(sample, "")
+    def detection(self, sample: Mapping[str, Any], *, user_prompt: str = "canonical") -> Mapping[str, Any]:
+        questions = {"legacy": FORENSICS_QUESTION, "canonical": UNIFIED_FORENSICS_QUESTION}
+        if user_prompt not in questions:
+            raise ValueError(f"Unknown detection user prompt: {user_prompt}")
+        batch = self._batch(sample, "", question=questions[user_prompt])
         # Detection consumes only the global encoder and fixed [CLS] state.
         # Avoid running SAM when no localization representation is requested.
         batch["grounding_enc_images"] = None
+        evidence_tokens = self._forensic_evidence_tokens([sample])
         with torch.no_grad():
-            output = self.model.model_forward(**batch)
+            output = self._model_forward_with_optional_evidence(batch, evidence_tokens)
         return self._prediction_fields(output)
 
     def generated_fake_vs_prefilled_fake_alignment(self, sample: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -401,7 +429,8 @@ class GLaMMForensicsBackend:
             ),
         }
 
-    def teacher_forced_localization(self, sample: Mapping[str, Any], *, context: str) -> Mapping[str, Any]:
+    def teacher_forced_localization(self, sample: Mapping[str, Any], *, context: str,
+                                    user_prompt: str = "canonical") -> Mapping[str, Any]:
         if context == "full":
             if sample.get("target_protocol") == "phrase_aligned":
                 assistant_content = self.tf_phrase_content(sample)
@@ -415,7 +444,13 @@ class GLaMMForensicsBackend:
             assistant_content = f"[FAKE] {TF_MINIMAL_CONTEXT_TEMPLATE}"
         else:
             raise ValueError(f"Unknown teacher-forced context: {context}")
-        _, output = self._causal_forward(sample, assistant_content)
+        questions = {
+            "legacy": FORENSICS_QUESTION,
+            "canonical": UNIFIED_FORENSICS_QUESTION,
+        }
+        if user_prompt not in questions:
+            raise ValueError(f"Unknown teacher-forced user prompt: {user_prompt}")
+        _, output = self._causal_forward(sample, assistant_content, question=questions[user_prompt])
         result = self._prediction_fields(output)
         pred_masks = output["pred_masks"][0]
         result.update({
@@ -477,6 +512,7 @@ class GLaMMForensicsBackend:
                 raise
             batch = self._batch(sample, assistant_content)
         original_sizes = [tuple(batch["label_list"][0].shape)]
+        evidence_tokens = self._forensic_evidence_tokens([sample])
         with torch.no_grad():
             evaluation_args = (
                 batch["global_enc_images"], batch["grounding_enc_images"], batch["input_ids"],
@@ -487,6 +523,8 @@ class GLaMMForensicsBackend:
                 "bboxes": batch["bboxes"],
                 "force_cls_token": False,
             }
+            if evidence_tokens is not None:
+                evaluation_kwargs["forensic_evidence_tokens"] = evidence_tokens
             try:
                 evaluation = self.model.evaluate(
                     *evaluation_args, **evaluation_kwargs, return_generation_details=True

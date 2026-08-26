@@ -1,0 +1,86 @@
+experiment:
+  name: phase4e1_tf_fdg_full_method
+  seed: 3407
+  output_root: outputs/phase4e1_tf_fdg_full_method
+  checkpoint_root: /data/yz/groundingLMM_official/checkpoints/phase4e1_tf_fdg_full_method
+  train_gpu: 0
+  cache_gpu: 1
+protocol:
+  architecture: docs/phase4e0/phase4e05_hardened_architecture.md
+  training: docs/phase4e0/phase4e1_full_method_training_proposal_v2.md
+  readiness: docs/phase4e0/phase4e05_execution_readiness.md
+  amendment: docs/phase4e0/phase4e1_preflight_blocker.md
+  valid_g0_conditional_optimization: true
+data:
+  manifest_dir: outputs/data_audits/unified_forensics_split_v1
+  train_fake: 8836
+  val_fake: 1106
+  train_valid_g0: 8690
+  val_valid_g0: 1078
+  target: official_annotation_derived_per_ref_polygon_and_all_ref_union
+  spatial_cache_root: outputs/phase3c1_spatial_probe/cache
+  replay_cache: outputs/phase3b_generated_replay/cache/train_fake_p1_g0.jsonl
+  validation_context_cache: outputs/phase4c_b_evidence_reader/cache/validation
+p1:
+  model_config: configs/phase3a_p1.yaml
+  checkpoint: /data/yz/groundingLMM_official/checkpoints/phase3a_phrase_grounding/p1/best/checkpoint/mp_rank_00_model_states.pt
+  checkpoint_sha256: fa4856f8c173c300050c3ae2149354e63a52bbced762d83fe518e9666136b326
+  step: 3500
+  epoch: 7
+  prompt: Determine whether this image is authentic and explain the forensic evidence.
+  prompt_sha256: 32f0856f718fb3e19f34b552892636fb6c2613adbae4afb8826dea89f670654d
+  hidden_extraction: hidden_at_token_immediately_preceding_last_valid_SEG_causal_predictor_before_text_hidden_fcs
+evidence:
+  forensic_checkpoint: /data/yz/groundingLMM_official/checkpoints/phase4c_a_clip_forensic_adapter/forensic_adapter/selected.pt
+  forensic_checkpoint_sha256: 725dd44e0c867360e7a963eb13d8312187fff185849bd52de6b78d4b27a078f7
+  forensic_selected_epoch: 4
+  clip_checkpoint: /data/yz/groundingLMM_official/checkpoints/phase4c_a_clip_forensic_adapter/clip_proj/selected.pt
+  clip_checkpoint_sha256: 0a1c83259f1dfa0ca8ea5f24f0b234f311c4440ae092b157e44abfee7806120b
+  clip_selected_epoch: 4
+architecture:
+  slots: 4
+  dim: 256
+  decoder_layers: 4
+  rectification_gamma: 0.01
+  locality_sigma: 0.25
+stage_t:
+  epochs: 5
+  batch_size: 8
+  steps_per_epoch: 1105
+  optimizer_steps: 5525
+  traversal_exposures: 44180
+  learning_rate: 0.0002
+  minimum_learning_rate: 0.00002
+  weight_decay: 0.05
+  warmup_fraction: 0.05
+  gradient_clip_norm: 1.0
+stage_s:
+  epochs: 10
+  batch_size: 8
+  dataloader_steps_per_epoch: 1105
+  traversal_exposures: 88360
+  optimization_eligible_exposures: 86900
+  qg_decoder_head_lr: 0.0001
+  pyramid_rectification_lr: 0.00005
+  weight_decay: 0.05
+  warmup_fraction: 0.05
+  gradient_clip_norm: 1.0
+loss:
+  mask: 1.0
+  relation: 0.2
+  attention: 0.5
+  feature: 0.25
+  logit: 0.5
+  assignment_attention: 0.25
+  temperature: 2.0
+evaluation:
+  batch_size: 1
+  threshold_logit: 0.0
+  bootstrap_repeats: 10000
+  bootstrap_seed: 3407
+arms:
+  tier1: [full, no_teacher, no_forensic, k1, full_clip]
+  tier2_priority: [no_kd, no_rectification, mask_logit_only]
+seal:
+  internal_test: true
+  official1000: true

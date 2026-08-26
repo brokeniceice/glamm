@@ -37,14 +37,16 @@ CONTENT_GROUPS = tuple(PROTOCOL_CONFIG["content_groups"])
 class ForensicsEvaluationBackend(Protocol):
     """Model-specific operations required by the protocol layer."""
 
-    def detection(self, sample: Mapping[str, Any]) -> Mapping[str, Any]: ...
+    def detection(
+        self, sample: Mapping[str, Any], *, user_prompt: str = "canonical"
+    ) -> Mapping[str, Any]: ...
 
     def generate_localization(
         self, sample: Mapping[str, Any], *, provide_gt_fake: bool
     ) -> Mapping[str, Any]: ...
 
     def teacher_forced_localization(
-        self, sample: Mapping[str, Any], *, context: str
+        self, sample: Mapping[str, Any], *, context: str, user_prompt: str = "canonical"
     ) -> Mapping[str, Any]: ...
 
 
@@ -220,12 +222,13 @@ def _binary_summary(labels: list[int], predictions: list[int], probabilities: li
 
 
 def evaluate_detection(
-    samples: Iterable[Mapping[str, Any]], backend: ForensicsEvaluationBackend
+    samples: Iterable[Mapping[str, Any]], backend: ForensicsEvaluationBackend, *,
+    user_prompt: str = "canonical",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Evaluate both authenticity heads on every Real and Fake sample."""
     records = []
     for sample in samples:
-        prediction = backend.detection(sample)
+        prediction = backend.detection(sample, user_prompt=user_prompt)
         record = _sample_record(sample, "detection")
         record.update(_prediction_fields(prediction))
         records.append(record)
@@ -466,14 +469,17 @@ def evaluate_legacy_gt_fake_generation_localization(samples, backend):
 
 
 def evaluate_teacher_forced_full_context(
-    samples: Iterable[Mapping[str, Any]], backend: ForensicsEvaluationBackend
+    samples: Iterable[Mapping[str, Any]], backend: ForensicsEvaluationBackend, *,
+    user_prompt: str = "canonical",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Teacher-forced GT verdict + GT explanation diagnostic upper bound."""
     records = []
     for sample in samples:
         if not _eligible_fake(sample):
             continue
-        output = backend.teacher_forced_localization(sample, context="full")
+        output = backend.teacher_forced_localization(
+            sample, context="full", user_prompt=user_prompt
+        )
         records.append(_localization_record(
             sample, output, "tf_full_context", uses_gt_authenticity=True,
             uses_gt_explanation=True, classification_gate=False,
@@ -482,14 +488,17 @@ def evaluate_teacher_forced_full_context(
 
 
 def evaluate_teacher_forced_minimal_context(
-    samples: Iterable[Mapping[str, Any]], backend: ForensicsEvaluationBackend
+    samples: Iterable[Mapping[str, Any]], backend: ForensicsEvaluationBackend, *,
+    user_prompt: str = "canonical",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Teacher-forced fixed minimal template diagnostic (no GT explanation)."""
     records = []
     for sample in samples:
         if not _eligible_fake(sample):
             continue
-        output = backend.teacher_forced_localization(sample, context="minimal")
+        output = backend.teacher_forced_localization(
+            sample, context="minimal", user_prompt=user_prompt
+        )
         records.append(_localization_record(
             sample, output, "tf_minimal_context", uses_gt_authenticity=True,
             uses_gt_explanation=False, classification_gate=False,

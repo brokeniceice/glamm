@@ -258,16 +258,19 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
                       attention_masks: torch.LongTensor, offset: torch.LongTensor, masks_list: List[torch.FloatTensor],
                       label_list: List[torch.Tensor], resize_list: List[tuple], inference: bool = False,
                       cls_labels: torch.LongTensor = None, seg_valid: torch.BoolTensor = None,
-                      precomputed_grounding_embeddings: torch.FloatTensor = None, **kwargs, ):
+                      precomputed_grounding_embeddings: torch.FloatTensor = None,
+                      forensic_evidence_tokens: torch.FloatTensor = None, **kwargs, ):
 
         # Handle inference or training paths
         if inference:
             output, output_hidden_states = self._inference_path(
-                input_ids, global_enc_images, attention_masks, offset, bboxes
+                input_ids, global_enc_images, attention_masks, offset, bboxes,
+                forensic_evidence_tokens=forensic_evidence_tokens,
             )
         else:
             output, output_hidden_states = self._training_path(
-                global_enc_images, bboxes, input_ids, labels, attention_masks, offset
+                global_enc_images, bboxes, input_ids, labels, attention_masks, offset,
+                forensic_evidence_tokens=forensic_evidence_tokens,
             )
 
         cls_logits, cls_valid_mask = self._extract_cls_logits(output_hidden_states, input_ids)
@@ -370,7 +373,7 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
             length = target_length if target_length is not None else input_ids.shape[1]
             return torch.zeros((input_ids.shape[0], length), dtype=torch.bool, device=input_ids.device)
 
-        image_expansion = 575
+        image_expansion = 575 + int(getattr(self, "forensic_evidence_token_count", 0))
         expanded_lengths = input_ids.shape[1] + input_ids.eq(IMAGE_TOKEN_INDEX).sum(dim=1) * image_expansion
         if target_length is None:
             target_length = int(expanded_lengths.max().item())
@@ -459,7 +462,8 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
             return cls_logits.sum() * 0.0
         return F.cross_entropy(cls_logits[supervised].float(), cls_labels[supervised]) * self.cls_loss_weight
 
-    def _inference_path(self, input_ids, global_enc_images, attention_masks, offset, bboxes):
+    def _inference_path(self, input_ids, global_enc_images, attention_masks, offset, bboxes,
+                        forensic_evidence_tokens=None):
         global_enc_images = self._prepare_global_enc_image(global_enc_images, offset)
         output = super().forward(
             images=global_enc_images,
@@ -467,10 +471,12 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
             input_ids=input_ids,
             output_hidden_states=True,
             bboxes=bboxes,
+            forensic_evidence_tokens=forensic_evidence_tokens,
         )
         return output, output.hidden_states
 
-    def _training_path(self, global_enc_images, bboxes, input_ids, labels, attention_masks, offset):
+    def _training_path(self, global_enc_images, bboxes, input_ids, labels, attention_masks, offset,
+                       forensic_evidence_tokens=None):
         if global_enc_images is not None:
             global_enc_images = self._prepare_global_enc_image(global_enc_images, offset)
         bboxes_list = bboxes
@@ -484,7 +490,10 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
         forward_labels = None if all_text_ignored else labels
         output = super().forward(
             images=global_enc_images, attention_mask=attention_masks, input_ids=input_ids, labels=forward_labels,
-            output_hidden_states=True, bboxes=bboxes_list, )
+            output_hidden_states=True, bboxes=bboxes_list,
+            forensic_evidence_tokens=forensic_evidence_tokens, )
+        # The optional continuous evidence tokens are inserted beside the
+        # original visual tokens by the shared multimodal preparation path.
         expanded_labels = labels if all_text_ignored else output.get("expanded_labels", labels)
         if all_text_ignored:
             output.loss = output.logits.sum() * 0.0
@@ -510,6 +519,7 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
             last_hidden_state,
             input_ids,
             self.seg_token_idx,
+            image_expansion=575 + int(getattr(self, "forensic_evidence_token_count", 0)),
             min_token_index=min_token_index,
         )
         projected = [self.model.text_hidden_fcs[0](states) for states in per_conversation]
@@ -622,7 +632,8 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
                 "seg_unexpected_pred_count": torch.tensor(unexpected_pred_count, device=ce_loss.device), }
 
     def evaluate(self, global_enc_images, grounding_enc_images, input_ids, resize_list, orig_sizes, max_tokens_new=32,
-                 bboxes=None, force_cls_token=True, return_generation_details=False):
+                 bboxes=None, force_cls_token=True, return_generation_details=False,
+                 forensic_evidence_tokens=None):
         with torch.no_grad():
             generation_kwargs = {}
             if self.token_strategy == "fixed_cls_query":
@@ -633,7 +644,8 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
             generation_outputs = self.generate(
                 images=global_enc_images, input_ids=input_ids, bboxes=bboxes, max_new_tokens=max(2, max_tokens_new),
                 num_beams=1, output_hidden_states=False, return_dict_in_generate=True,
-                output_scores=return_generation_details, use_cache=True, **generation_kwargs)
+                output_scores=return_generation_details, use_cache=True,
+                forensic_evidence_tokens=forensic_evidence_tokens, **generation_kwargs)
 
             generated_output_ids = generation_outputs.sequences
             generated_attention = generated_output_ids.ne(self.config.pad_token_id)
@@ -643,6 +655,7 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
                 input_ids=generated_output_ids,
                 output_hidden_states=True,
                 bboxes=bboxes,
+                forensic_evidence_tokens=forensic_evidence_tokens,
             )
             output_hidden_states = full_output.hidden_states
 

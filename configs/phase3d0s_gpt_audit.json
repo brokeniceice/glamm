@@ -1,0 +1,19 @@
+{
+  "schema_version": "phase3d0s_gpt_audit_config_v1",
+  "model": "gpt-5.6-luna",
+  "api_endpoint_type": "OpenAI Responses API",
+  "image_detail": "high",
+  "reasoning_effort": "none",
+  "temperature": 0,
+  "max_output_tokens": 600,
+  "seed": 3407,
+  "primary_q2_vs_greedy": 300,
+  "primary_q2_vs_oldr3": 100,
+  "failure_per_stratum": 20,
+  "repeatability_pairs": 50,
+  "max_image_side": 768,
+  "jpeg_quality": 88,
+  "timeout_seconds": 180,
+  "max_retries": 5,
+  "default_workers": 4
+}

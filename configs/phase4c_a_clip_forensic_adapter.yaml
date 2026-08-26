@@ -1,0 +1,59 @@
+experiment:
+  name: P4C-A-CLIP-FORENSIC-ADAPTER
+  seed: 3407
+  output_root: outputs/phase4c_a_clip_forensic_adapter
+  checkpoint_root: /data/yz/groundingLMM_official/checkpoints/phase4c_a_clip_forensic_adapter
+source:
+  phase3c1_root: outputs/phase3c1_spatial_probe
+  feature: frozen_p1_clip_hidden_minus_2_patch_tokens
+  channels: 1024
+  height: 24
+  width: 24
+  storage_dtype: bfloat16
+  preprocessing: CLIPImageProcessor-ResizeShortest336-CenterCrop336-Rescale-Normalize:v1
+  preprocessing_sha256: f0c2820531bcb07c753ea57838de0c18040223ae310352f00a66f890ee8355a2
+  clip_parameter_hash: ea25ce94579902eb0a94c9638c0277360f2b93cc156eb20f2fc4a481653afc17
+  p1_checkpoint_sha256: fa4856f8c173c300050c3ae2149354e63a52bbced762d83fe518e9666136b326
+data:
+  train_fake: 8836
+  val_fake: 1106
+  target: official_annotation_derived_per_image_all_reference_union
+architecture:
+  projected_channels: 256
+  adapter_blocks: 3
+  group_norm_groups: 32
+  dense_head: Conv2d(256,1,kernel_size=1,bias=true)
+training:
+  epochs: 10
+  batch_size: 16
+  effective_batch_size: 16
+  steps_per_epoch: 553
+  total_optimizer_steps: 5530
+  total_fake_exposures: 88360
+  precision: bf16
+  gradient_clip_norm: 1.0
+optimizer:
+  name: AdamW
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  warmup_steps: 277
+  scheduler: linear_warmup_then_cosine_decay
+loss:
+  bce_weight: 2.0
+  dice_weight: 0.5
+selector:
+  primary: validation_fake_mean_foreground_iou
+  tie_break: validation_fake_mean_foreground_f1
+  candidates: [0,1,2,3,4,5,6,7,8,9,10]
+  threshold_logit: 0.0
+statistics:
+  bootstrap_repeats: 10000
+  significance: bootstrap_95_ci_lower_gt_0
+prohibited:
+  - internal_test
+  - official1000
+  - threshold_tuning
+  - P1_integration
+  - architecture_sweep
+

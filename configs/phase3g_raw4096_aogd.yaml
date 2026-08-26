@@ -1,0 +1,79 @@
+experiment:
+  name: phase3g_raw4096_aogd
+  seed: 3407
+  output_root: outputs/phase3g_raw4096_aogd
+  checkpoint_root: /data/yz/groundingLMM_official/checkpoints/phase3g_raw4096_aogd
+source:
+  model_config: configs/phase3a_p1.yaml
+  checkpoint: /data/yz/groundingLMM_official/checkpoints/phase3a_phrase_grounding/p1/best/checkpoint/mp_rank_00_model_states.pt
+  checkpoint_sha256: fa4856f8c173c300050c3ae2149354e63a52bbced762d83fe518e9666136b326
+  optimizer_step: 3500
+  epoch: 7
+phase3f_reuse:
+  schedule: outputs/phase3f_autonomous_oracle_grounding_distillation/training/schedule.json
+  schedule_sha256: f7fd823635cdb8d63420e296e9e552fa943beffd8c0fb8a3444148cd99bc1758
+  teacher_cache: /data/yz/groundingLMM_official/checkpoints/phase3f_autonomous_oracle_grounding_distillation/teacher_cache/projected_256d.pt
+  teacher_cache_manifest: outputs/phase3f_autonomous_oracle_grounding_distillation/teacher/teacher_cache_manifest.json
+  rollout_cache: outputs/phase3b_generated_replay/cache/train_fake_p1_g0.jsonl
+  rollout_cache_sha256: 6ab4c428748e426132edaf6570ee38f12bbc8c1a2e0d44b089152563fd0990ed
+rollout:
+  phase3b_cache: outputs/phase3b_generated_replay/cache/train_fake_p1_g0.jsonl
+  cache_sha256: 6ab4c428748e426132edaf6570ee38f12bbc8c1a2e0d44b089152563fd0990ed
+data:
+  manifest_dir: outputs/data_audits/unified_forensics_split_v1
+  datasets_root: datasets
+  synthscars_root: datasets/SynthScars
+  target_protocol: phrase_aligned
+prompt:
+  template_id: unified_forensics_v1
+  user_question: Determine whether this image is authentic and explain the forensic evidence.
+student:
+  trainable: [lora]
+  lora_rank: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  lora_target_modules: [q_proj, v_proj]
+loss:
+  language_ce_weight: 1.0
+  representation_weight: 1.0
+  representation: raw_4096d_cosine
+  projected_256d_weight: 0.0
+  classification_weight: 0.0
+  mask_weight: 0.0
+optimizer:
+  name: AdamW
+  lora_lr: 1.0e-5
+  betas: [0.9, 0.95]
+  weight_decay: 0.0
+  scheduler: linear_warmup_decay
+  warmup_steps: 100
+training:
+  total_optimizer_steps: 4500
+  total_image_exposures: 18000
+  batch_size_per_device: 1
+  gradient_accumulation_steps: 4
+  effective_batch_size: 4
+  precision: bf16
+  gradient_clip_norm: 1.0
+  physical_checkpoint_interval: 100
+  formal_checkpoint_steps: [0, 500, 1000, 2000, 3000, 4000, 4500]
+preflight:
+  fake_count: 32
+  directional_minibatch_count: 4
+  gate_on_failure: GATE_RAW4096_GRADIENT_DIRECTION_INVALID
+selector:
+  candidate_steps: [0, 500, 1000, 2000, 3000, 4000, 4500]
+  primary: fake_g0_per_image_mean_foreground_iou
+  tie_breaker: fake_g0_per_image_mean_foreground_f1
+  classification_accuracy_max_drop: 0.005
+  classification_f1_max_drop: 0.005
+  structure_validity_max_drop: 0.005
+evaluation:
+  generation_batch_size: 1
+  max_new_tokens: 400
+  mask_logit_threshold: 0.0
+  bootstrap_repeats: 10000
+  bootstrap_seed: 3407
+runtime:
+  physical_gpu: 0
+  pytorch_cuda_alloc_conf: max_split_size_mb:512
