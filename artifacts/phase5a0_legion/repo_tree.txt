@@ -1,0 +1,98 @@
+LEGION official repository tree at d21535dd45f6fea509337a83095966f0b86ac924
+Depth: 3; .git excluded
+
+.
+|-- README.md
+|-- assets
+|   |-- icons
+|   |   |-- detection.png
+|   |   |-- explanation.png
+|   |   |-- localization.png
+|   |   `-- robot.png
+|   |-- images
+|   |   |-- dataset.png
+|   |   `-- new_case_framework.png
+|   `-- tables
+|       |-- detection_table.png
+|       |-- explanation_table.png
+|       |-- hps_table.png
+|       `-- localization_table.png
+|-- dataset
+|   |-- caption_datasets
+|   |   |-- COCO_Caption_ds.py
+|   |   |-- GranD_ShortCaption_ds.py
+|   |   `-- LLavaInstruct_vqa_ds.py
+|   |-- dataset.py
+|   |-- gcg_datasets
+|   |   `-- GranDf_gcg_ds.py
+|   |-- region_datasets
+|   |   |-- Flickr_Region_ds.py
+|   |   |-- GranD_ReferringRegion_ds.py
+|   |   `-- RefCOCO_VG_Region_ds.py
+|   |-- segm_datasets
+|   |   |-- GranD_ReferringSegm_ds.py
+|   |   |-- RefCOCO_Segm_ds.py
+|   |   `-- Semantic_Segm_ds.py
+|   `-- utils
+|       `-- utils.py
+|-- eval
+|   |-- ddp.py
+|   `-- utils.py
+|-- mmdet
+|   |-- __init__.py
+|   |-- apis
+|   |-- core
+|   |-- datasets
+|   |-- models
+|   |-- utils
+|   `-- version.py
+|-- model
+|   |-- Legion.py
+|   |-- SAM
+|   |   |-- __init__.py
+|   |   |-- build_sam.py
+|   |   |-- modeling
+|   |   `-- utils
+|   |-- layers.py
+|   `-- llava
+|       |-- conversation.py
+|       |-- llava_with_region_arch.py
+|       |-- mm_utils.py
+|       `-- model
+|-- requirements
+|   |-- default.txt
+|   `-- regenerator.txt
+|-- scripts
+|   |-- cls
+|   |   |-- eval.py
+|   |   |-- eval.sh
+|   |   |-- train.py
+|   |   `-- train.sh
+|   |-- loc_exp
+|   |   |-- infer.py
+|   |   |-- infer.sh
+|   |   |-- train.py
+|   |   `-- train.sh
+|   |-- merge_weights
+|   |   |-- merge_lora_weights.py
+|   |   |-- step1.sh
+|   |   `-- step2.sh
+|   `-- refine
+|       |-- inpainter.py
+|       |-- inpainter.sh
+|       |-- reflection_infer.py
+|       |-- regenerator.py
+|       `-- regenerator.sh
+`-- tools
+    `-- utils.py
+
+Directory roles:
+- scripts/loc_exp: localization + explanation train/inference entry points.
+- scripts/cls: separate binary detection head train/eval entry points.
+- scripts/merge_weights: DeepSpeed consolidation and PEFT LoRA merge to HF format.
+- model: GLaMM/LLaVA-derived LLM, CLIP bridge, region encoder, SAM stack.
+- dataset: mixed GLaMM datasets plus SynthScars/LEGION GCG loader.
+- eval: preprocessing, mask utilities, flat-folder DDP dataset and distributed setup.
+- mmdet: vendored MMDetection code used by region feature extraction.
+- requirements: defender/default and controller/regenerator dependency locks.
+- tools: token constants and training/inference helpers.

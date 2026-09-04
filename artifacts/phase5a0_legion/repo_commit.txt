@@ -1,0 +1,13 @@
+Phase: Phase 5A-0
+Audit timestamp (UTC): 2026-08-31
+Repository path: /home/yz/groundingLMM_official/external/LEGION_official
+Remote fetch: https://github.com/opendatalab/LEGION.git
+Remote push: https://github.com/opendatalab/LEGION.git
+Branch: main
+Commit: d21535dd45f6fea509337a83095966f0b86ac924
+Latest commit: d21535d upload weights for artifact loacalization and explanation
+Commit date: 2025-10-22T16:27:42+08:00
+Worktree: clean (## main...origin/main)
+Tags: none
+
+All Phase 5A-0 source conclusions are bound to the full commit above.

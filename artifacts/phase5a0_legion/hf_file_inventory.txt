@@ -1,0 +1,52 @@
+Repository: https://huggingface.co/khr0516/legion_LE
+Revision: f8c28b349ccbb0b5d4240c9eb82beaa9a2586ffa
+Revision title: upload weights for artifact localization and explanation
+Revision date: 2025-10-22T07:42:11Z
+Previous/initial revision: ab87c945dbdb2cf0496340eb67f1926900808047
+Last modified: 2025-10-22T07:42:11Z
+Tags: pytorch, llava
+Model card / README: absent
+Declared pipeline/library: absent
+
+Files at pinned revision (bytes):
+       1,645  .gitattributes
+         137  added_tokens.json
+       1,822  config.json
+         176  generation_config.json
+9,976,691,902  pytorch_model-00001-of-00002.bin
+6,776,538,784  pytorch_model-00002-of-00002.bin
+      96,091  pytorch_model.bin.index.json
+         438  special_tokens_map.json
+     499,723  tokenizer.model
+         749  tokenizer_config.json
+
+Weight inventory:
+- PyTorch .bin shards: 2
+- Index-declared tensor bytes: 16,752,883,392
+- State-dict keys: 968
+- .safetensors: 0
+- .pt/.pth: 0
+- adapter_config.json / adapter_model: 0
+- LoRA-specific files: 0
+- standalone projector files: 0 (projector tensors are in the main shards)
+- standalone SAM file: 0 (SAM tensors are in the main shards)
+- tokenizer/config files: present
+
+LFS SHA-256:
+- pytorch_model-00001-of-00002.bin: 07080b5ac1840f0fb5c2a569796058b42e0699277bac6ba3a77aa8793dc6daeb
+- pytorch_model-00002-of-00002.bin: b743f1cce5bccbe613f94c108dfb5d327c18096161fdf7303b1497fd2efe7fb7
+- tokenizer.model: 9e556afd44213b6bd1be2b850ebbbd98f5481437a8021afaf58ee7fb1818d347
+
+Important config:
+- model_type=llava; architectures=[GLaMMForCausalLM] (stale base naming)
+- hidden_size=4096; layers=32; heads=32; vocab_size=32007
+- vision_tower=openai/clip-vit-large-patch14-336
+- out_dim=256; train_mask_decoder=true; torch_dtype=bfloat16
+- transformers_version=4.28.0
+- tokenizer_class=LlamaTokenizer; tokenizer model_max_length=1536
+- added tokens: <im_start>, <im_end>, <bbox>, <point>, [SEG], <p>, </p>
+
+Sources:
+- https://huggingface.co/api/models/khr0516/legion_LE?blobs=true
+- https://huggingface.co/api/models/khr0516/legion_LE/commits/main
+- https://huggingface.co/khr0516/legion_LE/tree/f8c28b349ccbb0b5d4240c9eb82beaa9a2586ffa

@@ -1,0 +1,82 @@
+LEGION localization + explanation call graph
+Source commit: d21535dd45f6fea509337a83095966f0b86ac924
+
+ENTRY
+scripts/loc_exp/infer.sh
+  -> python scripts/loc_exp/infer.py
+  -> required --hf_model_path and --output_dir are placeholders
+  -> default --image_dir is also replaced by a placeholder in the shell script
+
+MODEL LOAD
+scripts/loc_exp/infer.py::main (lines 108-142)
+  -> AutoTokenizer.from_pretrained(hf_model_path)
+  -> tokenizer("[SEG]") obtains seg_token_idx
+  -> model/Legion.py::LegionForCausalLM.from_pretrained(hf_model_path)
+     -> LegionForCausalLM (LlavaLlamaForCausalLM)
+     -> LegionModel (LegionBaseModel + LlavaLlamaModel)
+     -> model/SAM/build_sam.py::build_sam_vit_h(None)
+     -> HF from_pretrained loads LLM + SAM + projectors from public shards
+  -> model/llava/llava_with_region_arch.py::initialize_vision_modules(config)
+     -> model/llava/model/multimodal_encoder/builder.py::build_vision_tower
+     -> CLIPVisionTower(openai/clip-vit-large-patch14-336)
+  -> model and CLIP tower move to CUDA bf16
+
+INPUT ENUMERATION
+scripts/loc_exp/infer.py::main (lines 144-160)
+  -> fixed artifact-analysis instruction
+  -> eval/ddp.py::GCGEvalDDP(image_dir)
+     -> os.listdir(image_dir); flat entries only; no extension/type filtering
+  -> cv2.imread(path)
+  -> scripts/loc_exp/infer.py::inference(...)
+
+GLOBAL IMAGE / LLM PATH
+scripts/loc_exp/infer.py::inference (lines 45-77)
+  -> llava_v1 conversation template
+  -> prompt: "The <image> provides an overview ..." + fixed instruction
+  -> CLIPImageProcessor.preprocess -> bf16 CUDA image_clip
+  -> tokenizer_image_token -> input_ids
+  -> model/Legion.py::LegionForCausalLM.evaluate
+     -> LlavaLlamaForCausalLM.generate(images=image_clip)
+     -> model/llava/llava_with_region_arch.py::prepare_inputs_labels_for_multimodal
+     -> CLIP vision tower -> mm_projector -> LLaMA token stream
+     -> generated text tokens and generation hidden states
+
+GROUNDING IMAGE / MASK PATH
+scripts/loc_exp/infer.py::inference (lines 57-77)
+  -> ResizeLongestSide(1024).apply_image(original RGB)
+  -> eval/utils.py::grounding_image_ecoder_preprocess
+     -> normalize, pad to 1024 x 1024
+  -> model/Legion.py::LegionForCausalLM.evaluate (lines 289-312)
+     -> find generated [SEG] token positions
+     -> _process_hidden_states
+        -> model.text_hidden_fcs[0]: Linear(4096,4096), ReLU, Linear(4096,256)
+        -> one 256-D prompt embedding per generated [SEG]
+     -> get_grounding_encoder_embs
+        -> SAM ViT-H image_encoder(1024 x 1024 grounding image)
+     -> _generate_and_postprocess_masks
+        -> SAM prompt_encoder(text_embeds=...)
+        -> SAM mask_decoder(multimask_output=False)
+        -> low_res mask logits
+        -> SAM postprocess_masks(input_size=resized H,W; original_size=original H,W)
+        -> logits shaped [number_of_SEG_tokens, original_H, original_W]
+
+OUTPUT
+scripts/loc_exp/infer.py::main (lines 162-180)
+  -> threshold each mask logit at > 0
+  -> torch.any over all [SEG] masks (union)
+  -> uint8 {0,255} original-resolution mask
+  -> output_dir/<input_filename>/mask.png
+  -> decode text, remove tags and [SEG]
+  -> output_dir/<input_filename>/explanation.json
+     structure: {"<input path>": "<cleaned free-form explanation>"}
+  -> phrases from <p>...</p> are parsed but not saved
+  -> no logits/tensor/NumPy file; no structured per-region JSON
+
+LAUNCH-TIME BLOCKERS IN STOCK SCRIPT
+1. infer.sh does not set PYTHONPATH; root invocation cannot import eval/model packages.
+2. infer.sh launches plain python, while infer.py unconditionally constructs DistributedSampler.
+3. default local_rank=-1 is passed as sampler rank; no process group is initialized by stock shell.
+4. flat folder is not filtered; any non-image/subdirectory reaches cv2.imread and can fail.
+5. GPU is implicit current CUDA device; no CUDA_VISIBLE_DEVICES in infer.sh.
+
+These are audit findings only. No official source was patched.

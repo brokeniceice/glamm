@@ -1,0 +1,55 @@
+{
+  "phase": "Phase 5A-1",
+  "status": "S-A",
+  "scope": "single-image smoke test only",
+  "legion": {
+    "repository": "https://github.com/opendatalab/LEGION.git",
+    "local_path": "/home/yz/groundingLMM_official/external/LEGION_official",
+    "commit": "d21535dd45f6fea509337a83095966f0b86ac924",
+    "worktree_clean_after_run": true,
+    "core_code_modified": false
+  },
+  "checkpoint": {
+    "repository": "khr0516/legion_LE",
+    "revision": "f8c28b349ccbb0b5d4240c9eb82beaa9a2586ffa",
+    "identity": "official released intermediate LE checkpoint",
+    "path": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/models/legion_LE_f8c28b349ccbb0b5d4240c9eb82beaa9a2586ffa",
+    "shard_sha256": {
+      "pytorch_model-00001-of-00002.bin": "07080b5ac1840f0fb5c2a569796058b42e0699277bac6ba3a77aa8793dc6daeb",
+      "pytorch_model-00002-of-00002.bin": "b743f1cce5bccbe613f94c108dfb5d327c18096161fdf7303b1497fd2efe7fb7"
+    }
+  },
+  "clip": {
+    "repository": "openai/clip-vit-large-patch14-336",
+    "revision": "ce19dc912ca5cd21c8a653c79e251e808ccabcd1",
+    "path": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/models/clip-vit-large-patch14-336_ce19dc912ca5cd21c8a653c79e251e808ccabcd1",
+    "pytorch_model_sha256": "c6032c2e0caae3dc2d4fba35535fa6307dbb49df59c7e182b1bc4b3329b81801"
+  },
+  "runtime": {
+    "environment": "/home/yz/miniconda3/envs/legion",
+    "python": "3.10.21",
+    "torch": "1.13.1+cu117",
+    "gpu_physical_index": 1,
+    "gpu_uuid": "GPU-69f825a5-8566-423b-f02b-f5454cf6d425",
+    "gpu_name": "NVIDIA RTX A6000",
+    "peak_memory_allocated_bytes": 18552989696,
+    "peak_memory_reserved_bytes": 19379781632,
+    "elapsed_seconds": 36.62852521240711
+  },
+  "input": {
+    "path": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/run/input/matt_mcnulty_nyc_ordinary_photo.jpg",
+    "source": "/usr/share/backgrounds/matt-mcnulty-nyc-2nd-ave.jpg (ubuntu-wallpapers-focal)",
+    "sha256": "7231c2921ac2db970ee859f21264f0a79545d3a891392068621ab0eb99ce64f9",
+    "size_wh": [3840, 2560]
+  },
+  "result": {
+    "model_load_succeeded": true,
+    "explanation_nonempty": true,
+    "seg_count": 2,
+    "mask_written": true,
+    "mask_shape_hw": [2560, 3840],
+    "foreground_ratio": 0.005121358235677083,
+    "forward_count": 1
+  },
+  "run_root": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/run"
+}

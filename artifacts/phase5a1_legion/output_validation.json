@@ -1,0 +1,29 @@
+{
+  "input_path": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/run/input/matt_mcnulty_nyc_ordinary_photo.jpg",
+  "input_size_wh": [
+    3840,
+    2560
+  ],
+  "input_sha256": "7231c2921ac2db970ee859f21264f0a79545d3a891392068621ab0eb99ce64f9",
+  "explanation_path": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/run/output/matt_mcnulty_nyc_ordinary_photo.jpg/explanation.json",
+  "explanation": "Upon examining the image. I have found: A dimly lit subway platform features a distorted and unrecognizable text on the right side of the column, while the left side of the column is missing a portion of its structure.To elaborate, I have found the following artifacts. Text on the right side of the column :The text on the right side of the column is distorted and unrecognizable. The left side of the column :The left side of the column is missing a portion of its structure.",
+  "explanation_nonempty": true,
+  "mask_path": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/run/output/matt_mcnulty_nyc_ordinary_photo.jpg/mask.png",
+  "mask_size_wh": [
+    3840,
+    2560
+  ],
+  "mask_shape_hw": [
+    2560,
+    3840
+  ],
+  "mask_mode": "L",
+  "mask_unique_values": [
+    0,
+    255
+  ],
+  "foreground_pixels": 50345,
+  "total_pixels": 9830400,
+  "foreground_ratio": 0.005121358235677083,
+  "mask_sha256": "38eac20512e125dff026fd62eb77c4aaa440e2a98421a5c5df48240e2a702513"
+}

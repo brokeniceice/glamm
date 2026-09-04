@@ -1,0 +1,54 @@
+Phase 5A-0 dependency audit
+Source: requirements/default.txt at LEGION d21535dd45f6fea509337a83095966f0b86ac924
+
+Environment isolation:
+- Created: /home/yz/miniconda3/envs/legion
+- Python: 3.10.21
+- Heavy/model dependencies installed in legion env: NO
+- Existing R1 environment modified: NO
+
+Official/runtime key versions:
+- Python: 3.10 (README); isolated env resolves 3.10.21
+- torch: 1.13.1+cu117
+- torchvision: 0.14.1+cu117
+- transformers: 4.28.0
+- tokenizers: 0.13.3
+- peft: 0.5.0
+- deepspeed: 0.12.5
+- flash-attn: 2.3.6
+- bitsandbytes: NOT LISTED
+- mmcv: not pip-pinned; README requires source checkout tag v1.4.7 with MMCV_WITH_OPS=1
+- mmdet: 2.22.0, vendored in repository (`mmdet/version.py`)
+- opencv-python: 4.8.0.74
+- kornia: 0.7.3
+- numpy: 1.24.2
+- safetensors: 0.4.1 (public checkpoint itself is .bin)
+- Pillow: 9.4.0
+- pycocotools: 2.0.6
+- scipy: 1.11.2
+- scikit-image: 0.22.0
+- sentencepiece: 0.1.99
+- bleach: 6.0.0
+
+CUDA implications:
+- torch/torchvision wheels target CUDA 11.7.
+- flash-attn and source-built mmcv ops require a compatible compiler/toolkit stack.
+- README does not pin an NVIDIA driver or system CUDA version beyond the cu117 wheel choice.
+
+Model assets needed for public checkpoint inference:
+- khr0516/legion_LE pinned at f8c28b3: required.
+- openai/clip-vit-large-patch14-336: required at runtime; not in legion_LE shards.
+- MBZUAI/GLaMM-GranD-Pretrained: NOT required at runtime for the already merged public checkpoint.
+- sam_vit_h_4b8939.pth: NOT required at runtime because full SAM keys are in public shards.
+
+Model assets needed only for training/official merge reconstruction:
+- MBZUAI/GLaMM-GranD-Pretrained: required by merge step 2.
+- sam_vit_h_4b8939.pth: required by training/merge step 2.
+- DeepSpeed checkpoint plus zero_to_fp32.py: required by merge step 1.
+
+Static checks (no forward):
+- bash -n infer.sh, step1.sh, step2.sh: PASS
+- py_compile infer.py, Legion.py, merge_lora_weights.py, eval/ddp.py, eval/utils.py: PASS
+- infer.py --help from repository root without PYTHONPATH: FAIL (No module named eval)
+- infer.py --help with PYTHONPATH=./ in existing R1 env: reaches dependency import then FAIL (kornia absent)
+- No dependency installation was attempted in the new legion environment.

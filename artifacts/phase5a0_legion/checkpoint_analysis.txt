@@ -1,0 +1,62 @@
+LEGION public checkpoint analysis
+HF repository: khr0516/legion_LE
+Pinned revision: f8c28b349ccbb0b5d4240c9eb82beaa9a2586ffa
+Index total: 16,752,883,392 tensor bytes; 968 state-dict keys
+
+Key-family counts from pytorch_model.bin.index.json:
+- LLM/embed/norm/lm_head: 323
+- SAM image_encoder: 457
+- SAM prompt_encoder: 17
+- SAM mask_decoder: 120
+- text_hidden_fcs: 4
+- mm_projector: 4
+- region_encoder: 43
+- CLIP vision_tower: 0
+- detection prediction_head: 0
+- LoRA/adapter-named keys: 0
+
+Checkpoint form:
+- Format classification: A, complete merged localization+explanation HF model directory.
+- Provenance/status classification: intermediate training checkpoint, not paper-final.
+- It is not a LoRA-only adapter, not a raw DeepSpeed checkpoint, and not a partial SAM/projector delta.
+- It contains the full LLaMA-language weights, LM head, MM projector, region encoder, SAM ViT-H,
+  SAM prompt encoder, SAM mask decoder, and text-to-SAM projection.
+- It deliberately does not contain CLIP vision-tower weights; official merge code excludes them and
+  inference initializes openai/clip-vit-large-patch14-336 separately.
+- It does not contain LegionForCls.prediction_head, so it is not a detection checkpoint.
+
+Merge status:
+- Official step 1: DeepSpeed ZeRO checkpoint -> consolidated pytorch_model.bin.
+  Whether the published model literally descended from the hard-coded global_step703 step-1 output: UNKNOWN.
+- Official step 2: reconstruct GLaMM + SAM + PEFT LoRA model, strict-load consolidated state dict,
+  merge_and_unload, remove vision_tower tensors, save HF model/tokenizer.
+- Published checkpoint has the exact structural signature of step-2 output: YES, step 2 is complete.
+- No merge is required to use the public checkpoint.
+
+Core questions:
+Q1 Exact paper-final localization checkpoint publicly exists: NO.
+Evidence: official README says original final weights cannot be located and publishes intermediate LE weights.
+
+Q2 Exact paper-final explanation checkpoint publicly exists: NO.
+Evidence: localization/explanation share the released LE model; author labels it intermediate, not final.
+
+Q3 khr0516/legion_LE can execute localization: CONDITIONALLY.
+Evidence: full SAM/text projection/LLM keys plus official inference path; requires dependencies, external CLIP,
+GPU bf16 support and corrected launch environment. No forward was run in Phase 5A-0.
+
+Q4 khr0516/legion_LE can execute explanation: CONDITIONALLY.
+Evidence: complete LLM/tokenizer/[SEG] setup and official text output path; same runtime conditions as Q3.
+
+Q5 khr0516/legion_LE is the paper-table final model: NO.
+Evidence: official README explicitly calls it intermediate; Issue #11 also asks for best-performance weights.
+
+Final-weight wording:
+- Exact final LE public availability: NO.
+- Exact final detection public availability: NO; README says users must train detection themselves.
+- Whether an unreleased recoverable copy exists somewhere: UNKNOWN.
+- Current public intermediate LE model availability: YES.
+
+Reproducibility class: Case A for first smoke inference, with two qualifications:
+1. It reproduces the public intermediate model, not the paper's exact final table checkpoint.
+2. The stock infer.sh launcher is incomplete; use a non-invasive wrapper/environment in Phase 5A-1,
+   not a silent patch to official core code.

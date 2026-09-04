@@ -1,0 +1,47 @@
+# Phase 4G-1P final report
+
+Phase 4G-1P 已完成 CSCU-LF graph/target/tau/interaction/split/protocol freeze，并完成无性能 synthetic implementation/invariance preflight。没有 conditional-utility fitting、calibration、audit、localization probe或formal checkpoint。
+
+`CSCU_LF_ARCHITECTURE_FROZEN: YES`
+
+`UTILITY_TARGET_FROZEN: YES`
+
+`TAU_FROZEN: YES`
+
+`REFINEMENT_INCLUDED: NO`
+
+`ADAPTED_ECOLAF_FORMULA_FROZEN: YES`
+
+`UTILITY_ONE_PARITY: PASS`
+
+`UTILITY_ZERO_SEMANTICS: PASS`
+
+`UTILITY_MONOTONICITY: PASS`
+
+`VACUOUS_EXACT_P1: PASS`
+
+`GEOMETRY_SUPPORT: PASS`
+
+`SPATIAL_MISMATCH_SENSING_CAPACITY: YES`
+
+`CROSS_IMAGE_MISMATCH_SENSING_CAPACITY: YES`
+
+`UTILITY_INTERVENTION_IDENTITY: PASS`
+
+`GRADIENT_ISOLATION: PASS`
+
+`NO_ORACLE_LEAKAGE: PASS`
+
+`INVALID_G0_POLICY: PASS`
+
+`UTILITY_SPLIT_FROZEN: YES`
+
+`CONDITIONAL_UTILITY_PREFLIGHT_PROTOCOL_FROZEN: YES`
+
+`CONDITIONAL_UTILITY_PREFLIGHT_JUSTIFIED: YES`
+
+`FORMAL_TRAINING_JUSTIFIED: NO`
+
+Tau=0.0417200699；trainable parameters=371,803。新的 UTILITY-AUDIT 与旧 G1-C TRAIN-AUDIT overlap=0，尚未消费。
+
+到此 STOP。不得自动 fit U_F、校准、读取 UTILITY-AUDIT、运行 full training/G1-F/AHBFR/Teacher-KD，也不得访问 development validation、internal test或official1000；等待人工授权 CSCU-LF Conditional-Utility Validity Preflight。

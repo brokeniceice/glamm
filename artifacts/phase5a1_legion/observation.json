@@ -1,0 +1,78 @@
+{
+  "status": "completed",
+  "started_at_utc": "2026-08-31T05:02:34.841818+00:00",
+  "legion_repo": "/home/yz/groundingLMM_official/external/LEGION_official",
+  "model_dir": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/models/legion_LE_f8c28b349ccbb0b5d4240c9eb82beaa9a2586ffa",
+  "clip_dir": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/models/clip-vit-large-patch14-336_ce19dc912ca5cd21c8a653c79e251e808ccabcd1",
+  "image_dir": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/run/input",
+  "output_dir": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/run/output",
+  "cuda_visible_devices": "1",
+  "clip_path_redirects": [
+    {
+      "class": "CLIPVisionConfig",
+      "requested": "openai/clip-vit-large-patch14-336",
+      "resolved": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/models/clip-vit-large-patch14-336_ce19dc912ca5cd21c8a653c79e251e808ccabcd1"
+    },
+    {
+      "class": "CLIPVisionConfig",
+      "requested": "openai/clip-vit-large-patch14-336",
+      "resolved": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/models/clip-vit-large-patch14-336_ce19dc912ca5cd21c8a653c79e251e808ccabcd1"
+    },
+    {
+      "class": "CLIPImageProcessor",
+      "requested": "openai/clip-vit-large-patch14-336",
+      "resolved": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/models/clip-vit-large-patch14-336_ce19dc912ca5cd21c8a653c79e251e808ccabcd1"
+    },
+    {
+      "class": "CLIPVisionModel",
+      "requested": "openai/clip-vit-large-patch14-336",
+      "resolved": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/models/clip-vit-large-patch14-336_ce19dc912ca5cd21c8a653c79e251e808ccabcd1"
+    },
+    {
+      "class": "CLIPVisionConfig",
+      "requested": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/models/clip-vit-large-patch14-336_ce19dc912ca5cd21c8a653c79e251e808ccabcd1",
+      "resolved": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/models/clip-vit-large-patch14-336_ce19dc912ca5cd21c8a653c79e251e808ccabcd1"
+    },
+    {
+      "class": "CLIPImageProcessor",
+      "requested": "openai/clip-vit-large-patch14-336",
+      "resolved": "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/models/clip-vit-large-patch14-336_ce19dc912ca5cd21c8a653c79e251e808ccabcd1"
+    }
+  ],
+  "evaluate_calls": [
+    {
+      "generated_shape": [
+        1,
+        279
+      ],
+      "seg_token_id": 32004,
+      "seg_count": 2,
+      "pred_mask_shapes": [
+        [
+          2,
+          2560,
+          3840
+        ]
+      ]
+    }
+  ],
+  "decoded_outputs": [
+    "<s>A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions. USER: The <im_start> <im_end> provides an overview of the picture.\nPlease provide a detailed analysis of artifacts in this photo, considering physical artifacts (e.g., optical display issues, violations of physical laws, and spatial/perspective errors), structural artifacts (e.g., deformed objects, asymmetry, or distorted text), and distortion artifacts (e.g., color/texture distortion, noise/blur, artistic style errors, and material misrepresentation). Output with interleaved segmentation masks for the corresponding parts of the answer. ASSISTANT: Upon examining the image. I have found: A dimly lit subway platform features a distorted and unrecognizable text on the right side of the column, while the left side of the column is missing a portion of its structure.\nTo elaborate, I have found the following artifacts. <p> Text on the right side of the column </p> [SEG] :The text on the right side of the column is distorted and unrecognizable. <p> The left side of the column </p> [SEG]  :The left side of the column is missing a portion of its structure.</s>"
+  ],
+  "official_argv": [
+    "/home/yz/groundingLMM_official/external/LEGION_official/scripts/loc_exp/infer.py",
+    "--hf_model_path",
+    "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/models/legion_LE_f8c28b349ccbb0b5d4240c9eb82beaa9a2586ffa",
+    "--image_dir",
+    "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/run/input",
+    "--output_dir",
+    "/data/yz/myLISA_storage/checkpoints/phase5a1_legion/run/output",
+    "--local_rank",
+    "0"
+  ],
+  "gpu_name": "NVIDIA RTX A6000",
+  "peak_memory_allocated_bytes": 18552989696,
+  "peak_memory_reserved_bytes": 19379781632,
+  "finished_at_utc": "2026-08-31T05:03:16.890994+00:00",
+  "elapsed_seconds": 36.62852521240711
+}
