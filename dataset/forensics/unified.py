@@ -15,7 +15,13 @@ from transformers import CLIPImageProcessor
 
 from model.SAM.utils.transforms import ResizeLongestSide
 from model.llava import conversation as conversation_lib
-from tools.utils import DEFAULT_IMAGE_TOKEN
+from model.llava.mm_utils import tokenizer_image_token
+from tools.utils import (
+    DEFAULT_CLS_TOKEN,
+    DEFAULT_IMAGE_TOKEN,
+    DEFAULT_IM_END_TOKEN,
+    DEFAULT_IM_START_TOKEN,
+)
 
 from .synthscars import polygon_to_mask, polygons_for_target
 
@@ -25,6 +31,7 @@ FAKE_TOKEN = "[FAKE]"
 SEG_TOKEN = "[SEG]"
 TARGET_PROTOCOL_HISTORICAL = "historical"
 TARGET_PROTOCOL_PHRASE_ALIGNED = "phrase_aligned"
+TARGET_PROTOCOL_NATIVE_MULTISEG = "native_multiseg"
 PHRASE_FIELD_PREFIX = "Target regions:"
 REAL_EXPLANATION = "No identifiable synthetic artifact evidence is detected."
 CANONICAL_UNIFIED_QUESTION = "Determine whether this image is authentic and explain the forensic evidence."
@@ -90,6 +97,7 @@ class UnifiedForensicsDataset(torch.utils.data.Dataset):
         self.split = split
         if target_protocol not in {
             TARGET_PROTOCOL_HISTORICAL, TARGET_PROTOCOL_PHRASE_ALIGNED,
+            TARGET_PROTOCOL_NATIVE_MULTISEG,
         }:
             raise ValueError(f"Unsupported target protocol: {target_protocol}")
         self.target_protocol = target_protocol
@@ -146,6 +154,88 @@ class UnifiedForensicsDataset(torch.utils.data.Dataset):
         return torch.from_numpy(union.astype(np.float32)).unsqueeze(0)
 
     @staticmethod
+    def ordered_phrase_mask_pairs(
+        row: Mapping[str, Any], height: int, width: int
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Decode ordered native phrase-mask pairs, accounting for invalid refs."""
+        if row["forensics_domain"] != "fake":
+            return [], []
+        pairs, dropped = [], []
+        for ref_index, ref in enumerate(row.get("refs") or []):
+            phrase = " ".join(str(ref.get("phrase") or "").split())
+            if not phrase:
+                dropped.append({"ref_index": ref_index, "reason": "empty_phrase"})
+                continue
+            try:
+                mask = polygon_to_mask(
+                    polygons_for_target(ref, height, width), height, width
+                ).astype(bool)
+            except (KeyError, TypeError, ValueError) as error:
+                dropped.append({
+                    "ref_index": ref_index,
+                    "reason": "invalid_polygon_target",
+                    "detail": f"{type(error).__name__}: {error}",
+                })
+                continue
+            if not mask.any():
+                dropped.append({"ref_index": ref_index, "reason": "empty_mask"})
+                continue
+            pairs.append({
+                "ref_index": ref_index,
+                "phrase": phrase,
+                "mask": torch.from_numpy(mask.astype(np.float32)),
+            })
+        return pairs, dropped
+
+    @staticmethod
+    def _multiseg_target(row: Mapping[str, Any], pairs: Sequence[Mapping[str, Any]]) -> str:
+        explanation = " ".join(str(row.get("explanation") or "").split())
+        if not explanation:
+            raise ValueError(f"Fake sample {row.get('sample_id')} has no explanation")
+        units = [f"<p>{pair['phrase']}</p>{SEG_TOKEN}" for pair in pairs]
+        return f"{FAKE_TOKEN} {explanation}" + (("\n" + "\n".join(units)) if units else "")
+
+    def _native_multiseg_conversation(
+        self, row: Mapping[str, Any], pairs: Sequence[Mapping[str, Any]]
+    ) -> tuple[list[str], list[str]]:
+        conv = conversation_lib.default_conversation.copy()
+        conv.messages = []
+        conv.append_message(conv.roles[0], CANONICAL_UNIFIED_USER_CONTENT)
+        conv.append_message(conv.roles[1], self._multiseg_target(row, pairs))
+        return [CANONICAL_UNIFIED_QUESTION], [conv.get_prompt()]
+
+    def _native_multiseg_token_length(self, conversation: str) -> int:
+        replace = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
+        value = conversation.replace(DEFAULT_IMAGE_TOKEN, replace)
+        conv = conversation_lib.default_conversation.copy()
+        assistant_prefix = conv.sep + conv.roles[1] + ": "
+        value = value.replace(assistant_prefix, assistant_prefix + DEFAULT_CLS_TOKEN + " ")
+        return int(tokenizer_image_token(value, self.tokenizer, return_tensors="pt").numel())
+
+    def _truncate_native_pairs(
+        self, row: Mapping[str, Any], pairs: list[dict[str, Any]], dropped: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[str]]:
+        """Tail-truncate only complete phrase-[SEG]-mask units."""
+        budget = self.tokenizer.model_max_length
+        if budget > 575:
+            budget -= 575
+        selected = list(pairs)
+        questions, conversations = self._native_multiseg_conversation(row, selected)
+        while self._native_multiseg_token_length(conversations[0]) > budget and selected:
+            pair = selected.pop()
+            dropped.append({
+                "ref_index": pair["ref_index"],
+                "reason": "token_budget_atomic_suffix_truncation",
+            })
+            questions, conversations = self._native_multiseg_conversation(row, selected)
+        # If every complete pair has been removed, the remaining sequence has
+        # no phrase/[SEG]/mask alignment left to protect.  Preserve the
+        # historical P1 behavior by letting the collator truncate this
+        # explanation-only prefix.  The sample stays in classification/LM
+        # training and, with K=0, contributes no localization supervision.
+        return selected, dropped, questions, conversations
+
+    @staticmethod
     def authoritative_localization_field(row: Mapping[str, Any]) -> dict[str, Any]:
         """Construct the single-SEG localization field without paraphrasing refs."""
         if row["forensics_domain"] != "fake":
@@ -179,6 +269,8 @@ class UnifiedForensicsDataset(torch.utils.data.Dataset):
             raise ValueError(f"Fake sample {row.get('sample_id')} has no explanation")
         if target_protocol == TARGET_PROTOCOL_HISTORICAL:
             return f"{FAKE_TOKEN} {explanation} {SEG_TOKEN}"
+        if target_protocol == TARGET_PROTOCOL_NATIVE_MULTISEG:
+            raise ValueError("native_multiseg target requires decoded ordered phrase-mask pairs")
         if target_protocol != TARGET_PROTOCOL_PHRASE_ALIGNED:
             raise ValueError(f"Unsupported target protocol: {target_protocol}")
         phrase = UnifiedForensicsDataset.authoritative_localization_field(row)[
@@ -215,9 +307,33 @@ class UnifiedForensicsDataset(torch.utils.data.Dataset):
         )
 
         seg_valid = row["forensics_domain"] == "fake"
-        masks = self._fake_union_mask(row, original_height, original_width) if seg_valid else None
-        questions, conversations = self._conversation(row, self.target_protocol)
-        if self.target_protocol == TARGET_PROTOCOL_PHRASE_ALIGNED:
+        multiseg_pairs: list[dict[str, Any]] = []
+        dropped_pairs: list[dict[str, Any]] = []
+        if seg_valid and self.target_protocol == TARGET_PROTOCOL_NATIVE_MULTISEG:
+            multiseg_pairs, dropped_pairs = self.ordered_phrase_mask_pairs(
+                row, original_height, original_width
+            )
+            multiseg_pairs, dropped_pairs, questions, conversations = self._truncate_native_pairs(
+                row, multiseg_pairs, dropped_pairs
+            )
+            masks = (
+                torch.stack([pair["mask"] for pair in multiseg_pairs])
+                if multiseg_pairs else None
+            )
+            seg_valid = bool(multiseg_pairs)
+        else:
+            masks = self._fake_union_mask(row, original_height, original_width) if seg_valid else None
+            questions, conversations = self._conversation(row, self.target_protocol)
+        if self.target_protocol == TARGET_PROTOCOL_NATIVE_MULTISEG:
+            localization_field = {
+                "ordered_pairs": [
+                    {"ref_index": pair["ref_index"], "phrase": pair["phrase"]}
+                    for pair in multiseg_pairs
+                ],
+                "dropped_pairs": dropped_pairs,
+                "construction_rule": "annotation_order_native_phrase_seg_mask_pairs",
+            }
+        elif self.target_protocol == TARGET_PROTOCOL_PHRASE_ALIGNED:
             localization_field = self.authoritative_localization_field(row)
         else:
             # Historical Phase 2A does not consume refs.phrase.  Keeping this
@@ -251,4 +367,7 @@ class UnifiedForensicsDataset(torch.utils.data.Dataset):
             "prompt_sha256": CANONICAL_PROMPT_SHA256,
             "target_protocol": self.target_protocol,
             "localization_field": localization_field,
+            "multiseg_pair_count": len(multiseg_pairs),
+            "multiseg_ref_indices": [pair["ref_index"] for pair in multiseg_pairs],
+            "multiseg_dropped_pairs": dropped_pairs,
         }

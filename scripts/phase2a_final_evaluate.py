@@ -98,6 +98,11 @@ def load_model(config: dict, checkpoint_path: Path, device: torch.device,
     tokenizer = glamm_train.setup_tokenizer_and_special_tokens(args)
     model = glamm_train.initialize_model(args, tokenizer)
     model = glamm_train.prepare_model_for_training(model, tokenizer, args)
+    if config.get("forensics", {}).get("conditioning") == "frozen_rine_q2_direct_embedding_token":
+        rine_path = Path(config["forensics"]["rine_checkpoint"])
+        if not rine_path.is_absolute():
+            rine_path = REPO_ROOT / rine_path
+        model.enable_rine_conditioning(rine_path.resolve())
     state = torch.load(checkpoint_path, map_location="cpu")
     if int(state.get("optimizer_step", -1)) != expected_step or int(state.get("epoch", -1)) != expected_epoch:
         raise ValueError(
@@ -110,6 +115,9 @@ def load_model(config: dict, checkpoint_path: Path, device: torch.device,
     model.gradient_checkpointing_disable()
     model.requires_grad_(False)
     model.to(device=device, dtype=torch.bfloat16).eval()
+    if hasattr(model, "rine_conditioner"):
+        model.rine_conditioner.rine.float()
+        model.rine_conditioner.eval()
     return model, tokenizer, {
         "checkpoint": str(checkpoint_path.resolve()),
         "checkpoint_sha256": file_sha256(checkpoint_path),

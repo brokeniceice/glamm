@@ -1,5 +1,144 @@
 # P1 Reusable Evaluation Baselines
 
+## 0. 最终冻结跨模型对比（2026-09-08）
+
+本节是当前最新的论文对比入口，结果由 `outputs/final_evaluation/final_results.json` 和逐样本 prediction 文件重新校验后生成。表中 **LEGION-public** 指官方公开的 intermediate `legion_LE`，**LEGION-retrained** 指严格按官方两阶段方法在冻结 internal train 上重训所得模型。公开 intermediate 只有 LE 能力，没有训练好的 `prediction_head`，所以所有分类项均为 N/A。
+
+分类的正类为 Fake，threshold=`0.5`。定位统一使用原图分辨率、多个预测 mask 取 union、mask logit `>0`；无 `[SEG]`、无有效 q-seg 或其他协议失败均保留在完整 N 中且逐图 IoU/F1 记 0。P1/R1 与 LEGION 的 prompt 不是逐 token 相同：P1/R1 使用项目冻结 G0/G1，LEGION 使用官方 image-only L-FREE，因此跨架构定位比较是共同数据与 evaluator 下的 **cross-protocol comparison**。
+
+### 0.1 Internal2208 classification
+
+| Model | Execution | N (Real/Fake) | Accuracy | Precision | Fake recall | F1 | ROC-AUC | TNR / FPR |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| P1 | historical reuse | 2,208 (1,104/1,104) | 0.983696 | 0.988117 | 0.979167 | 0.983621 | 0.998389 | 0.988225 / 0.011775 |
+| R1 | exact reuse of unchanged P1 CLS head | 2,208 (1,104/1,104) | 0.983696 | 0.988117 | 0.979167 | 0.983621 | 0.998389 | 0.988225 / 0.011775 |
+| LEGION-public | N/A: no trained classification head | 2,208 (1,104/1,104) | N/A | N/A | N/A | N/A | N/A | N/A |
+| LEGION-retrained | historical reuse | 2,208 (1,104/1,104) | **0.986413** | 0.981183 | **0.991848** | **0.986486** | **0.999258** | 0.980978 / 0.019022 |
+
+### 0.2 AIGI-Holmes official TestSet classification
+
+| Model | N (Real/Fake) | Accuracy | Precision | Fake recall | F1 | ROC-AUC | TNR / FPR |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| R1 | 99,999 (50,000/49,999) | 0.831168 | **0.993120** | 0.666953 | 0.797995 | 0.956480 | **0.995380 / 0.004620** |
+| LEGION-public | 99,999 (50,000/49,999) | N/A | N/A | N/A | N/A | N/A | N/A |
+| LEGION-retrained | 99,999 (50,000/49,999) | **0.888109** | 0.990298 | **0.783896** | **0.875091** | **0.976110** | 0.992320 / 0.007680 |
+
+注意：冻结泄漏审计发现 AIGI-Holmes TestSet 与 internal train 有 779 个 exact SHA256 overlap、784 个 pHash near-overlap。实验依据已记录的 ACTIVE override 执行；这些结果必须带泄漏警告引用，不能表述为通过了无泄漏审计。
+
+### 0.3 GenImage official held-out classification
+
+| Model | N (Real/Fake) | Accuracy | Precision | Fake recall | F1 | ROC-AUC | TNR / FPR |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| R1 | 100,000 (50,000/50,000) | 0.641980 | 0.951303 | 0.299280 | 0.455317 | 0.871324 | **0.984680 / 0.015320** |
+| LEGION-public | 100,000 (50,000/50,000) | N/A | N/A | N/A | N/A | N/A | N/A |
+| LEGION-retrained | 100,000 (50,000/50,000) | **0.729160** | **0.962538** | **0.476880** | **0.637779** | **0.931478** | 0.981440 / 0.018560 |
+
+### 0.4 LOKI classification
+
+| Model | N (Real/Fake) | Accuracy | Precision | Fake recall | F1 | ROC-AUC | TNR / FPR |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| R1 | 2,217 (900/1,317) | 0.542625 | 0.749588 | 0.345482 | 0.472973 | 0.654220 | **0.831111 / 0.168889** |
+| LEGION-public | 2,217 (900/1,317) | N/A | N/A | N/A | N/A | N/A | N/A |
+| LEGION-retrained | 2,217 (900/1,317) | **0.583672** | **0.752564** | **0.445710** | **0.559847** | **0.681164** | 0.785556 / 0.214444 |
+
+### 0.5 RAISE998 Real-only classification
+
+| Model | N Real | TN / FP | TNR | FPR | Accuracy | Fake metrics |
+|---|---:|---:|---:|---:|---:|---|
+| R1 | 998 | **992 / 6** | **0.993988** | **0.006012** | **0.993988** | N/A |
+| LEGION-public | 998 | N/A | N/A | N/A | N/A | N/A |
+| LEGION-retrained | 998 | 987 / 11 | 0.988978 | 0.011022 | 0.988978 | N/A |
+
+RAISE998 没有 Fake，Accuracy 仅等价于 TNR；precision、Fake recall、F1 和 ROC-AUC 均不可定义。
+
+### 0.6 SynthScars Official1000 localization
+
+GT 为 official per-reference polygon 的逐图 union，无空 GT。P1/R1 为 G0，LEGION 为 L-FREE。
+
+| Model | Condition | N | Protocol failures | Mean / median FG IoU | Mean FG F1 | Global FG IoU / F1 |
+|---|---|---:|---:|---:|---:|---:|
+| P1 | G0 | 1,000 | 0 | 0.229544 / 0.149170 | 0.319323 | 0.236949 / 0.383118 |
+| R1 | G0 | 1,000 | 32 | **0.286588 / 0.232139** | **0.393974** | **0.267042 / 0.421521** |
+| LEGION-public | L-FREE | 1,000 | 1 | 0.223234 / 0.161411 | 0.321147 | 0.241450 / 0.388980 |
+| LEGION-retrained | L-FREE | 1,000 | 2 | 0.196195 / 0.133239 | 0.286687 | 0.200490 / 0.334014 |
+
+### 0.7 LOKI229 localization
+
+GT 是 229 张 Fake 图上 687 个官方 regional boxes 的逐图 union，属于 box-derived localization，不等价于像素级人工 artifact mask。P1/R1 为 known-Fake G1，LEGION 为 L-FREE。
+
+| Model | Condition | N | Protocol failures | Mean / median FG IoU | Mean FG F1 | Global FG IoU / F1 |
+|---|---|---:|---:|---:|---:|---:|
+| P1 | G1 | 229 | 0 | 0.076893 / 0.033442 | 0.126401 | 0.077554 / 0.143945 |
+| R1 | G1 | 229 | 9 | 0.061839 / 0.018219 | 0.103666 | 0.045873 / 0.087722 |
+| LEGION-public | L-FREE | 229 | 0 | **0.098816 / 0.059680** | **0.160061** | 0.116530 / 0.208735 |
+| LEGION-retrained | L-FREE | 229 | 3 | 0.079178 / 0.024776 | 0.127911 | **0.124314 / 0.221137** |
+
+### 0.8 X-AIGD official labeled_test localization
+
+N=2,419，其中 247 个官方 `labels=[]` 样本按官方语义保留为全零 GT；非空 GT 为 2,172。GT 是 human perceptual-artifact polygon union。该数据集的论文主指标是 category-agnostic dataset-global FG IoU/F1，逐图均值为补充指标。P1/R1 为 G1，LEGION 为 L-FREE。
+
+| Model | Condition | Failures | Mean FG IoU (full / nonempty-GT) | Mean FG F1 (full / nonempty-GT) | Global FG IoU / F1 |
+|---|---|---:|---:|---:|---:|
+| P1 | G1 | 38 | 0.071161 / 0.078332 | 0.109794 / 0.121359 | 0.070236 / 0.131253 |
+| R1 | G1 | 38 | 0.080213 / 0.079206 | 0.119900 / 0.123406 | 0.059704 / 0.112680 |
+| LEGION-public | L-FREE | 5 | **0.083862 / 0.093399** | **0.129184 / 0.143875** | **0.090972 / 0.166773** |
+| LEGION-retrained | L-FREE | 5 | 0.077187 / 0.085964 | 0.119954 / 0.133596 | 0.079918 / 0.148008 |
+
+### 0.9 PAL4VST official test localization
+
+N=1,441，其中 313 个官方 mask 是全背景，非空 GT 为 1,128；所有样本均保留。P1/R1 为 G1，LEGION 为 L-FREE。
+
+| Model | Condition | Failures | Mean FG IoU (full / nonempty-GT) | Mean FG F1 (full / nonempty-GT) | Global FG IoU / F1 |
+|---|---|---:|---:|---:|---:|
+| P1 | G1 | 32 | 0.061279 / 0.076509 | 0.094792 / 0.119322 | 0.052402 / 0.099585 |
+| R1 | G1 | 32 | **0.097387 / 0.103134** | **0.138952 / 0.156232** | **0.094196 / 0.172175** |
+| LEGION-public | L-FREE | 3 | 0.059880 / 0.076495 | 0.095279 / 0.121718 | 0.061973 / 0.116714 |
+| LEGION-retrained | L-FREE | 8 | 0.050836 / 0.064942 | 0.081036 / 0.103522 | 0.045726 / 0.087454 |
+
+### 0.10 P1 → R1 定位增益的同图配对统计
+
+只有 P1 与 R1 在各数据集内共享相同样本、condition 和 evaluator，因此这里报告严格 paired 的 `R1−P1`；不能把该统计外推为 R1 与 LEGION 的严格 prompt-parity 因果比较。
+
+| Dataset | Metric | Mean delta | Bootstrap 95% CI | W/T/L | Wilcoxon p | 判读 |
+|---|---|---:|---:|---:|---:|---|
+| SynthScars | FG IoU | +0.057044 | [+0.045424, +0.068729] | 603/64/333 | 1.10e-22 | 稳健正增益 |
+| SynthScars | FG F1 | +0.074650 | [+0.060527, +0.088742] | 603/64/333 | 1.24e-24 | 稳健正增益 |
+| LOKI | FG IoU | -0.015054 | [-0.027823, -0.002607] | 80/35/114 | 0.008006 | 稳健退化 |
+| LOKI | FG F1 | -0.022735 | [-0.041244, -0.004345] | 80/35/114 | 0.007886 | 稳健退化 |
+| X-AIGD | FG IoU | +0.009053 | [+0.003303, +0.014983] | 965/541/913 | 0.108004 | bootstrap mean CI 为正，但 rank test 不显著；global 指标退化 |
+| X-AIGD | FG F1 | +0.010106 | [+0.003214, +0.017247] | 965/541/913 | 0.106325 | 同上 |
+| PAL4VST | FG IoU | +0.036109 | [+0.027028, +0.045448] | 506/618/317 | 1.24e-16 | 稳健正增益 |
+| PAL4VST | FG F1 | +0.044160 | [+0.033603, +0.054942] | 506/618/317 | 1.39e-16 | 稳健正增益 |
+
+### 0.11 GenImage 分生成器分类明细
+
+| Generator | Model | N | Accuracy | Fake recall | F1 | ROC-AUC | TNR / FPR |
+|---|---|---:|---:|---:|---:|---:|---:|
+| ADM | R1 | 12,000 | 0.526667 | 0.070167 | 0.129102 | 0.754379 | 0.983167 / 0.016833 |
+| ADM | LEGION-retrained | 12,000 | 0.622000 | 0.264500 | 0.411673 | 0.875066 | 0.979500 / 0.020500 |
+| BigGAN | R1 | 12,000 | 0.753500 | 0.521333 | 0.678967 | 0.961975 | 0.985667 / 0.014333 |
+| BigGAN | LEGION-retrained | 12,000 | 0.755000 | 0.526000 | 0.682231 | 0.962562 | 0.984000 / 0.016000 |
+| GLIDE | R1 | 12,000 | 0.622500 | 0.261167 | 0.408925 | 0.889720 | 0.983833 / 0.016167 |
+| GLIDE | LEGION-retrained | 12,000 | 0.760167 | 0.537833 | 0.691599 | 0.952912 | 0.982500 / 0.017500 |
+| Midjourney | R1 | 12,000 | 0.713250 | 0.439833 | 0.605345 | 0.908792 | 0.986667 / 0.013333 |
+| Midjourney | LEGION-retrained | 12,000 | 0.806750 | 0.635333 | 0.766771 | 0.950696 | 0.978167 / 0.021833 |
+| SD-v1.4 | R1 | 12,000 | 0.688250 | 0.391833 | 0.556911 | 0.915984 | 0.984667 / 0.015333 |
+| SD-v1.4 | LEGION-retrained | 12,000 | 0.787667 | 0.592167 | 0.736068 | 0.962765 | 0.983167 / 0.016833 |
+| SD-v1.5 | R1 | 16,000 | 0.688563 | 0.392750 | 0.557735 | 0.918437 | 0.984375 / 0.015625 |
+| SD-v1.5 | LEGION-retrained | 16,000 | 0.792125 | 0.602375 | 0.743443 | 0.962061 | 0.981875 / 0.018125 |
+| VQDM | R1 | 12,000 | 0.518833 | 0.054167 | 0.101183 | 0.766515 | 0.983500 / 0.016500 |
+| VQDM | LEGION-retrained | 12,000 | 0.578083 | 0.175000 | 0.293173 | 0.836111 | 0.981167 / 0.018833 |
+| Wukong | R1 | 12,000 | 0.608750 | 0.231833 | 0.372074 | 0.839156 | 0.985667 / 0.014333 |
+| Wukong | LEGION-retrained | 12,000 | 0.710500 | 0.440000 | 0.603153 | 0.938608 | 0.981000 / 0.019000 |
+
+### 0.12 总体结论与证据边界
+
+- 分类：LEGION-retrained 在 Internal、AIGI-Holmes、GenImage 和 LOKI 的 Accuracy/F1/ROC-AUC 均高于 R1，但 R1 在各外部集的 Real specificity 更高，且在 RAISE998 的 FPR 更低。LEGION-public 没有分类头，不能参与分类排名。
+- 定位：R1 在 SynthScars 与 PAL4VST 上取得最强的 mean/global 结果；LEGION-public 在 X-AIGD 上最强，在 LOKI 的逐图 mean 指标最强。LEGION-retrained 在四个定位集上均未超过 public intermediate 的 mean FG IoU，不能宣称重训已恢复或超过公开 LE checkpoint。
+- P1→R1 泛化：在 SynthScars 和 PAL4VST 上是明确正增益，在 LOKI 上明确退化；X-AIGD 的逐图 mean 提升很小且与 global IoU/F1 下降并存。因此不能概括为“R1 在所有定位数据集上普遍优于 P1”。
+- 泄漏边界：external-vs-internal-train 共记录 779 个 exact overlap 和 793 个 pHash near-overlap；AIGI-Holmes 与 GenImage 之间另有 35 个 pHash near-overlap。评测依据用户授权 override 保留全部样本，未过滤、未重新划分、未调 threshold。
+- 权威机器结果：`outputs/final_evaluation/final_results.json`；主表：`outputs/final_evaluation/tables/classification_main.csv`、`localization_main.csv`、`localization_coverage.csv`、`localization_p1_r1_paired.csv`、`genimage_per_generator.csv`。
+
 ## 1. 用途与基线身份
 
 本文集中保存 P1 已完成且可用于后续模型对比的 classification 与 segmentation/localization 结果。它是协议化基线目录，不是把不同数据集、prompt、target 或 aggregation 混在一起的统一排行榜。

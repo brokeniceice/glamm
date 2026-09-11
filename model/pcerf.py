@@ -28,6 +28,81 @@ DSMP_EPS = 1e-4
 PROBABILITY_EPS = 1e-6
 
 
+def multiseg_flatten(
+    grouped: list[torch.Tensor],
+) -> tuple[torch.Tensor, torch.LongTensor, torch.LongTensor]:
+    """Flatten variable-K SEG states and return image indices plus offsets."""
+    if not grouped:
+        raise ValueError("multiseg grouping must contain at least one image")
+    if any(value.ndim < 1 for value in grouped):
+        raise ValueError("each grouped tensor must have a leading K dimension")
+    trailing = grouped[0].shape[1:]
+    if any(value.shape[1:] != trailing for value in grouped):
+        raise ValueError("grouped SEG tensors have inconsistent trailing shapes")
+    device = grouped[0].device
+    counts = torch.tensor([value.shape[0] for value in grouped], dtype=torch.long, device=device)
+    offsets = torch.cat((counts.new_zeros(1), counts.cumsum(0)))
+    image_index = torch.repeat_interleave(torch.arange(len(grouped), device=device), counts)
+    if int(offsets[-1]) == 0:
+        flat = grouped[0].new_empty((0, *trailing))
+    else:
+        flat = torch.cat(grouped, dim=0)
+    return flat, image_index, offsets
+
+
+def multiseg_regroup(flat: torch.Tensor, offsets: torch.Tensor) -> list[torch.Tensor]:
+    """Inverse of :func:`multiseg_flatten`, preserving image and phrase order."""
+    offsets = torch.as_tensor(offsets, dtype=torch.long, device=flat.device).reshape(-1)
+    if offsets.numel() < 2 or int(offsets[0]) != 0 or int(offsets[-1]) != flat.shape[0]:
+        raise ValueError("invalid multiseg offsets")
+    if bool((offsets[1:] < offsets[:-1]).any()):
+        raise ValueError("multiseg offsets must be monotonic")
+    return [flat[int(start):int(end)] for start, end in zip(offsets[:-1], offsets[1:])]
+
+
+def multiseg_repeat_images(value: torch.Tensor, image_index: torch.Tensor) -> torch.Tensor:
+    """Repeat each image-side tensor once per SEG without creating parameters."""
+    if value.ndim < 1:
+        raise ValueError("image-side value must have a batch dimension")
+    index = torch.as_tensor(image_index, dtype=torch.long, device=value.device)
+    if index.numel() and (int(index.min()) < 0 or int(index.max()) >= value.shape[0]):
+        raise IndexError("multiseg image index out of range")
+    return value.index_select(0, index)
+
+
+def multiseg_r1_batch(
+    grouped_q_seg: list[torch.Tensor],
+    grouped_z_l: list[torch.Tensor],
+    image_batch: Mapping[str, object],
+) -> tuple[dict[str, object], torch.LongTensor]:
+    """Build the existing R1 utility input at ``T=sum(K)`` with shared weights.
+
+    Phrase-specific tensors (q_seg and preliminary z_L) are flattened in
+    order. Image-side tensors are repeated by image index; no module or
+    parameter is copied.
+    """
+    q_flat, image_index, offsets = multiseg_flatten(grouped_q_seg)
+    z_flat, z_image_index, z_offsets = multiseg_flatten(grouped_z_l)
+    if not torch.equal(image_index, z_image_index) or not torch.equal(offsets, z_offsets):
+        raise ValueError("q_seg/z_L multiseg grouping mismatch")
+    required = ("S64", "F24", "z_F24", "clip_geometries")
+    if any(key not in image_batch for key in required):
+        raise KeyError(f"R1 image batch requires {required}")
+    result: dict[str, object] = {"q_seg": q_flat, "z_L": z_flat}
+    for key in ("S64", "F24", "z_F24"):
+        value = image_batch[key]
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"{key} must be a tensor")
+        if value.shape[0] != len(grouped_q_seg):
+            raise ValueError(f"{key} image batch mismatch")
+        result[key] = multiseg_repeat_images(value, image_index)
+    geometries = list(image_batch["clip_geometries"])
+    if len(geometries) != len(grouped_q_seg):
+        raise ValueError("clip geometry image batch mismatch")
+    result["clip_geometries"] = [geometries[int(index)] for index in image_index.tolist()]
+    return result, offsets
+
+
 def tmc_expected_ce_kl(
     evidence: torch.Tensor,
     target: torch.Tensor,

@@ -349,6 +349,7 @@ def build_optimizer_parameter_groups(model, args):
         "mask_decoder": args.mask_decoder_lr if args.mask_decoder_lr is not None else args.lr,
         "embeddings": args.embedding_lr if args.embedding_lr is not None else args.lr,
         "lm_head": args.lm_head_lr if args.lm_head_lr is not None else args.lr,
+        "forensic_projector": args.lr,
     }
     grouped = {name: [] for name in lr_values}
     unknown = []
@@ -360,6 +361,8 @@ def build_optimizer_parameter_groups(model, args):
             group_name = "lora"
         elif "classification_head" in parameter_name:
             group_name = "classification_head"
+        elif "forensic_projector" in parameter_name:
+            group_name = "forensic_projector"
         elif "text_hidden_fcs" in parameter_name:
             group_name = "text_hidden_fcs"
         elif "grounding_encoder.mask_decoder" in parameter_name:
@@ -379,8 +382,10 @@ def build_optimizer_parameter_groups(model, args):
         raise ValueError(f"Unclassified trainable parameters: {unknown[:20]}")
     output = []
     for group_name, parameters in grouped.items():
-        if not parameters:
+        if not parameters and group_name != "forensic_projector":
             raise ValueError(f"Final optimizer group is empty: {group_name}")
+        if not parameters:
+            continue
         output.append({"name": group_name, "params": parameters, "lr": float(lr_values[group_name])})
     return output
 

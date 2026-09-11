@@ -208,6 +208,55 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
         self.register_buffer("seg_count_mismatch_total", torch.zeros((), dtype=torch.long), persistent=False)
         self.post_init()
 
+    def enable_rine_conditioning(self, rine_checkpoint, *, projector_dtype=None):
+        """Install the frozen Phase6B.6 RINE-Q2 branch and trainable C1 heads.
+
+        The existing CLIP tower is shared (and remains frozen); RINE performs a
+        separate deterministic forward through that tower.  Only Q2 is exposed
+        to the LLM through one directly injected continuous token.
+        """
+        from model.rine_on_c1 import RINEOnHFCLIP
+
+        hidden = int(self.config.hidden_size)
+        self.classification_head = nn.Sequential(
+            nn.Linear(hidden, 512), nn.ReLU(), nn.Linear(512, 2)
+        )
+        self.forensic_projector = nn.Sequential(
+            nn.Linear(1024, hidden), nn.GELU(), nn.Linear(hidden, hidden)
+        )
+        vision = self.get_vision_tower().vision_tower
+        self.rine_conditioner = RINEOnHFCLIP(vision)
+        payload = torch.load(rine_checkpoint, map_location="cpu", weights_only=False)
+        self.rine_conditioner.rine.load_state_dict(payload["rine_state_dict"], strict=True)
+        self.rine_conditioner.requires_grad_(False)
+        self.rine_conditioner.eval()
+        if projector_dtype is not None:
+            self.classification_head.to(dtype=projector_dtype)
+            self.forensic_projector.to(dtype=projector_dtype)
+        self.forensic_evidence_token_count = 1
+
+    def train(self, mode=True):
+        super().train(mode)
+        if hasattr(self, "rine_conditioner"):
+            self.rine_conditioner.eval()
+            self.rine_conditioner.requires_grad_(False)
+        return self
+
+    def _rine_evidence_token(self, global_enc_images):
+        if not hasattr(self, "rine_conditioner"):
+            return None
+        self.rine_conditioner.eval()
+        with torch.no_grad():
+            _, q2, _ = self.rine_conditioner(global_enc_images)
+        projected = self.forensic_projector(q2.to(dtype=self.forensic_projector[0].weight.dtype))
+        if projected.requires_grad:
+            projected.register_hook(
+                lambda grad: setattr(self, "_last_frc_gradient_norm", float(grad.detach().float().norm()))
+            )
+        self._last_rine_q2_stats = q2.detach().float()
+        self._last_frc_stats = projected.detach().float()
+        return projected.unsqueeze(1)
+
     def _set_model_configurations(self, config, kwargs):
         config.mm_use_image_start_end = kwargs.pop("use_mm_start_end", True)
         config.mm_vision_module = kwargs.get("vision_module", "openai/clip-vit-large-patch14-336")
@@ -259,7 +308,13 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
                       label_list: List[torch.Tensor], resize_list: List[tuple], inference: bool = False,
                       cls_labels: torch.LongTensor = None, seg_valid: torch.BoolTensor = None,
                       precomputed_grounding_embeddings: torch.FloatTensor = None,
-                      forensic_evidence_tokens: torch.FloatTensor = None, **kwargs, ):
+                      forensic_evidence_tokens: torch.FloatTensor = None,
+                      multiseg_cache_only: bool = False, **kwargs, ):
+
+        if hasattr(self, "rine_conditioner"):
+            if forensic_evidence_tokens is not None:
+                raise ValueError("C1 RINE conditioning forbids an external evidence token override")
+            forensic_evidence_tokens = self._rine_evidence_token(global_enc_images)
 
         # Handle inference or training paths
         if inference:
@@ -294,6 +349,12 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
             pred_embeddings, _ = self._extract_projected_seg_predictor_hidden(
                 output_hidden_states, input_ids, offset
             )
+
+            if multiseg_cache_only:
+                return {
+                    "projected_seg_embeddings": [value.detach() for value in pred_embeddings],
+                    "grounding_image_embeddings": image_embeddings.detach(),
+                }
 
             # Generate and post-process masks
             pred_masks = self._generate_and_postprocess_masks(
@@ -364,6 +425,14 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
         # context branch on the same image, avoiding redundant SAM encoding.
         loss_dict["grounding_image_embeddings"] = (
             image_embeddings.detach() if grounding_enc_images is not None else None
+        )
+        # Phase 6C.2 may cache the frozen selected-L2 teacher-forced SEG
+        # representations for the downstream R1-specific training stage.
+        # This diagnostic output is detached and does not alter any loss or
+        # trainable path.  Grouping remains one tensor [K_i, out_dim] per image.
+        loss_dict["projected_seg_embeddings"] = (
+            [value.detach() for value in pred_embeddings]
+            if grounding_enc_images is not None else None
         )
         return loss_dict
 
@@ -635,6 +704,13 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
                  bboxes=None, force_cls_token=True, return_generation_details=False,
                  forensic_evidence_tokens=None):
         with torch.no_grad():
+            if hasattr(self, "rine_conditioner"):
+                if forensic_evidence_tokens is not None:
+                    raise ValueError("C1 RINE evaluation forbids an external evidence token override")
+                # Generation bypasses model_forward, so construct the same
+                # frozen-Q2 -> trainable-projector token explicitly once and
+                # reuse it for autoregressive generation and the full replay.
+                forensic_evidence_tokens = self._rine_evidence_token(global_enc_images)
             generation_kwargs = {}
             if self.token_strategy == "fixed_cls_query":
                 if self.cls_token_idx is None or not input_ids.eq(self.cls_token_idx).any(dim=1).all():
@@ -707,6 +783,11 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
                 "scores": tuple(generation_outputs.scores),
                 "prompt_length": int(input_ids.shape[1]),
                 "max_new_tokens": int(max_tokens_new),
+                # Read-only Phase 6C.2 hook: retain the generated, ordered
+                # predictor states so the frozen L2 autoregressive trajectory
+                # can be replayed through one shared R1 rectifier.  This does
+                # not alter generation or the P1/SAM mask path.
+                "projected_seg_embeddings": [value.detach() for value in predicted_embeddings],
             }
             return generated_output_ids, pred_masks, cls_results, generation_details
         return generated_output_ids, pred_masks, cls_results

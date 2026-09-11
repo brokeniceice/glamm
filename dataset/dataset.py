@@ -148,7 +148,8 @@ def _stack_optional_tensors(values, field_name):
 
 
 def _truncate_training_batch_preserving_seg(
-    input_ids, targets, attention_masks, tokenizer, truncate_len, target_protocols=None
+    input_ids, targets, attention_masks, tokenizer, truncate_len, target_protocols=None,
+    multiseg_pair_counts=None,
 ):
     """Truncate long training rows without ever dropping an existing [SEG]."""
     seg_ids = tokenizer("[SEG]", add_special_tokens=False).input_ids
@@ -158,11 +159,19 @@ def _truncate_training_batch_preserving_seg(
     kept_ids, kept_targets = [], []
     preserve_count = 0
     protocols = target_protocols or [None] * len(input_ids)
+    pair_counts = multiseg_pair_counts or [0] * len(input_ids)
     phrase_suffix_ids = tokenizer("Target regions:", add_special_tokens=False).input_ids[1:]
-    for ids, labels, attention, protocol in zip(input_ids, targets, attention_masks, protocols):
+    for ids, labels, attention, protocol, pair_count in zip(
+        input_ids, targets, attention_masks, protocols, pair_counts
+    ):
         valid_len = int(attention.sum().item())
         ids, labels = ids[:valid_len], labels[:valid_len]
         if valid_len > truncate_len:
+            if protocol == "native_multiseg" and int(pair_count) > 0:
+                raise ValueError(
+                    "native_multiseg must be atomically pair-truncated by the forensic adapter "
+                    "before generic token truncation"
+                )
             seg_positions = ids.eq(seg_id).nonzero(as_tuple=False).flatten()
             if seg_positions.numel() and int(seg_positions[-1]) >= truncate_len:
                 tail_start = int(seg_positions[-1])
@@ -207,6 +216,7 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
     selected_labels_list, cls_labels_list, seg_valid_list, offset_list = [], [], [], [0]
     sample_ids, sources, content_categories = [], [], []
     prompt_template_ids, prompt_sha256s, target_protocols = [], [], []
+    multiseg_pair_counts, multiseg_ref_indices, multiseg_dropped_pairs = [], [], []
     cnt = 0
 
     # Iterating through the batch
@@ -230,6 +240,9 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
             prompt_template_ids.append(sample.get("prompt_template_id"))
             prompt_sha256s.append(sample.get("prompt_sha256"))
             target_protocols.append(sample.get("target_protocol"))
+            multiseg_pair_counts.append(int(sample.get("multiseg_pair_count", 0)))
+            multiseg_ref_indices.append(list(sample.get("multiseg_ref_indices", [])))
+            multiseg_dropped_pairs.append(list(sample.get("multiseg_dropped_pairs", [])))
         elif len(sample) == 10:
             (image_path, global_enc_image, grounding_enc_image, bboxes, conversations, masks, label, resize,
              questions, sampled_classes) = sample
@@ -241,6 +254,7 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
             prompt_template_ids.append(None)
             prompt_sha256s.append(None)
             target_protocols.append(None)
+            multiseg_pair_counts.append(0); multiseg_ref_indices.append([]); multiseg_dropped_pairs.append([])
         elif len(sample) == 11:
             (image_path, global_enc_image, grounding_enc_image, bboxes, conversations, masks, label, resize,
              questions, sampled_classes, cls_label) = sample
@@ -251,6 +265,7 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
             prompt_template_ids.append(None)
             prompt_sha256s.append(None)
             target_protocols.append(None)
+            multiseg_pair_counts.append(0); multiseg_ref_indices.append([]); multiseg_dropped_pairs.append([])
         else:
             raise ValueError(f"Expected a mapping or 10-/11-field dataset sample, got {len(sample)} fields")
         image_path_list.append(image_path)
@@ -294,6 +309,27 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
     )
     attention_masks = input_ids.ne(tokenizer.pad_token_id)
 
+    seg_ids = tokenizer("[SEG]", add_special_tokens=False).input_ids
+    if len(seg_ids) != 1:
+        raise ValueError("[SEG] must encode as exactly one token")
+    for index, protocol in enumerate(target_protocols):
+        # Autoregressive evaluation receives a prompt-only sequence by design;
+        # its generated [SEG] count does not exist until after generation.
+        # The strict target/mask count invariant applies to supervised
+        # teacher-forced batches, not to inference prompts.
+        if protocol != "native_multiseg" or inference:
+            continue
+        seg_count = int(input_ids[index].eq(seg_ids[0]).sum())
+        mask_count = 0 if masks_list[index] is None else int(masks_list[index].shape[0])
+        declared = multiseg_pair_counts[index]
+        if not (seg_count == mask_count == declared == len(multiseg_ref_indices[index])):
+            raise ValueError(
+                f"native_multiseg count mismatch at batch row {index}: "
+                f"phrase={declared} SEG={seg_count} mask={mask_count}"
+            )
+        if multiseg_ref_indices[index] != sorted(multiseg_ref_indices[index]):
+            raise ValueError(f"native_multiseg ref order drift at batch row {index}")
+
     # Preparing targets and handling conversation types
     targets = input_ids.clone()
     # conv_type == "llava_v1"
@@ -329,6 +365,7 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
                 _truncate_training_batch_preserving_seg(
                     input_ids, targets, attention_masks, tokenizer, truncate_len,
                     target_protocols=target_protocols,
+                    multiseg_pair_counts=multiseg_pair_counts,
                 )
             )
 
@@ -358,6 +395,9 @@ def custom_collate_fn(batch, tokenizer=None, use_mm_start_end=True, inference=Fa
         "prompt_sha256s": prompt_sha256s,
         "token_strategy": token_strategy,
         "seg_preserving_truncation_count": seg_preserving_truncation_count,
+        "multiseg_pair_counts": multiseg_pair_counts,
+        "multiseg_ref_indices": multiseg_ref_indices,
+        "multiseg_dropped_pairs": multiseg_dropped_pairs,
     }
 
 

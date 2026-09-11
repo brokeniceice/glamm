@@ -34,7 +34,7 @@ done
 # there so another user's active GPU-1 training is never disturbed.
 wait_gpu 2
 write_status RUNNING classification_r1
-CUDA_VISIBLE_DEVICES=2 "$python" scripts/final_eval_classification.py --model r1 --datasets aigi_holmes genimage --device cuda:0 >>"$out/logs/classification_r1.log" 2>&1
+CUDA_VISIBLE_DEVICES=2 "$python" scripts/final_eval_classification.py --model r1 --datasets aigi_holmes genimage loki raise998 --device cuda:0 >>"$out/logs/classification_r1.log" 2>&1
 write_status RUNNING classification_legion_retrained
 CUDA_VISIBLE_DEVICES=2 /home/yz/miniconda3/envs/legion/bin/python scripts/final_eval_classification.py --model legion_retrained --datasets aigi_holmes genimage loki raise998 --device cuda:0 >>"$out/logs/classification_legion_retrained.log" 2>&1
 

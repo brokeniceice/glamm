@@ -26,7 +26,10 @@ MANIFESTS={
  "raise998":ROOT/"datasets/RAISE/manifests/eval_manifest.jsonl",
 }
 P1=Path("/data/yz/groundingLMM_official/checkpoints/phase3a_phrase_grounding/p1/best/checkpoint/mp_rank_00_model_states.pt")
-LEGION_CLS=Path("/data/yz/myLISA_storage/checkpoints/phase5a3_legion_retrained/merged_cls")
+P1_SHA="fa4856f8c173c300050c3ae2149354e63a52bbced762d83fe518e9666136b326"
+LEGION_CLS=Path("/data/yz/myLISA_storage/checkpoints/phase5a3_legion_retrained/stage2_cls/final_model")
+LEGION_CLS_IDENTITY=ROOT/"checkpoints/phase5a3_legion_retrained/stage2_cls_identity.json"
+LEGION_CLS_SHA="f33fda9ddf0e22bcd9bca8dcc998d8a9c0c6421f6bd6a46573044c6cc7365739"
 OFFICIAL=ROOT/"external/LEGION_official"
 CLIP=Path("/data/yz/myLISA_storage/checkpoints/phase5a1_legion/models/clip-vit-large-patch14-336_ce19dc912ca5cd21c8a653c79e251e808ccabcd1")
 SAM=Path("/data/yz/myLISA_storage/checkpoints/phase5b0_fakeshield/models/sam_7790786db131bcdc639f24a915d9f2c331d843ee/checkpoints/sam_vit_h_4b8939.pth")
@@ -75,10 +78,13 @@ def metrics(rs):
   per[source]=binary_metrics(sub)
  out['per_source']=per;return out
 def load_r1(device):
+ if sha(P1)!=P1_SHA:raise RuntimeError('P1 checkpoint provenance drift')
  cfg=yaml.safe_load((ROOT/'configs/phase3a_p1.yaml').read_text());conversation_lib.default_conversation=conversation_lib.conv_templates['llava_v1']
  model,tok,_=load_model(cfg,P1,device,expected_step=3500,expected_epoch=7)
  return model,GLaMMForensicsBackend(model,tok,device=device,dtype=torch.bfloat16,use_mm_start_end=True,max_new_tokens=1),CLIPImageProcessor.from_pretrained(cfg['model']['vision_tower'],local_files_only=True)
 def load_legion(device):
+ identity=json.loads(LEGION_CLS_IDENTITY.read_text())
+ if identity.get('canonical_sha256')!=LEGION_CLS_SHA:raise RuntimeError('LEGION Stage-2 checkpoint provenance drift')
  repo=str(OFFICIAL.resolve());sys.path.insert(0,repo) if repo not in sys.path else None
  spec=importlib.util.spec_from_file_location('final_legion_cls',OFFICIAL/'scripts/cls/eval.py');m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
  saved=sys.argv;sys.argv=[saved[0],'--version',str(LEGION_CLS),'--pretrained','--precision','bf16','--vision_tower',str(CLIP),'--vision_pretrained',str(SAM)]
@@ -111,7 +117,12 @@ def main():
    indexed={r['sample_id']:r for r in rows(predpath)};ordered=[indexed[r['sample_id']] for r in source]
    if len(indexed)!=len(source):raise RuntimeError('incomplete output')
    predpath.write_text(''.join(json.dumps(r,ensure_ascii=False)+'\n' for r in ordered))
-   result={"status":"COMPLETE","model":a.model,"dataset":name,"manifest":str(MANIFESTS[name]),"manifest_sha256":sha(MANIFESTS[name]),"metrics":metrics(ordered)}
+   checkpoint=(
+    {"path":str(P1.resolve()),"sha256":P1_SHA,"role":"R1 exact-reuse unchanged P1 classification head"}
+    if a.model=='r1' else
+    {"path":str(LEGION_CLS.resolve()),"canonical_sha256":LEGION_CLS_SHA,"role":"LEGION-retrained Stage-2 classification checkpoint"}
+   )
+   result={"status":"COMPLETE","model":a.model,"dataset":name,"manifest":str(MANIFESTS[name]),"manifest_sha256":sha(MANIFESTS[name]),"checkpoint":checkpoint,"metrics":metrics(ordered)}
    if name=='genimage':
     result['reporting_contract']={"overall":True,"per_generator":True,"generator_count":8,"threshold":.5,"required_metrics":["n","real","fake","accuracy","precision","recall","specificity_tnr","fpr","f1","roc_auc","auprc","brier","tp","tn","fp","fn"]}
    atomic(dest/'results.json',result)

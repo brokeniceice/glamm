@@ -42,6 +42,7 @@ def parse_args(argv=None):
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--manifest-dir", default=None)
+    parser.add_argument("--split", choices=("val", "test"), default="test")
     parser.add_argument("--synthscars-root", default=None)
     parser.add_argument("--device", default="cuda:1")
     parser.add_argument("--modes", nargs="+", choices=MODES, default=list(MODES))
@@ -252,7 +253,7 @@ def main(argv=None):
         if cli.manifest_dir else (ROOT / config["data"]["manifest_dir"]).resolve()
     )
     dataset = UnifiedForensicsDataset(
-        manifest_dir, tokenizer, config["model"]["vision_tower"], split="test",
+        manifest_dir, tokenizer, config["model"]["vision_tower"], split=cli.split,
         datasets_root=config["data"]["datasets_root"],
         synthscars_root=cli.synthscars_root or config["data"]["synthscars_root"],
         image_size=int(config["model"]["image_size"]),
@@ -339,12 +340,20 @@ def main(argv=None):
         "checkpoint_file_sha256": file_sha256(checkpoint_path),
         "config": str(config_path),
         "manifest_dir": str(manifest_dir),
-        "test_samples": limit,
+        "split": cli.split,
+        "samples": limit,
         "seed": cli.seed,
         "tf_user_prompt": cli.tf_user_prompt,
         "detection_user_prompt": cli.detection_user_prompt,
         "soft_mask_diagnostics_included": cli.include_soft_mask_diagnostics,
-        "forensic_evidence_enabled": evidence_provider is not None,
+        "forensic_evidence_enabled": (
+            evidence_provider is not None or hasattr(model, "rine_conditioner")
+        ),
+        "forensic_evidence_mode": (
+            "builtin_frozen_rine_q2_projected_frc"
+            if hasattr(model, "rine_conditioner") else
+            ("external_provider" if evidence_provider is not None else "none")
+        ),
         "forensic_feature_cache": cli.forensic_feature_cache,
         "forensic_projector_checkpoint": cli.forensic_projector_checkpoint,
         "generation": {

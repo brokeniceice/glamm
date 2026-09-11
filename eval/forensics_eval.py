@@ -278,6 +278,11 @@ class GLaMMForensicsBackend:
                     ).encode("utf-8")).hexdigest()
                 ),
                 "raw_prompt_text": batch.get("conversation_list", [None] * len(samples))[index],
+                # Ordered generated [SEG] predictor states.  Consumers that do
+                # not request Phase 6C.2 replay ignore this diagnostic field.
+                "projected_seg_embeddings": details.get(
+                    "projected_seg_embeddings", [None] * len(samples)
+                )[index],
                 "assistant_prefix": "[CLS] [FAKE]" if assistant_content else "[CLS]",
                 "seg_probability_trace": trace,
                 **stop, **trace_summary, **drift,
