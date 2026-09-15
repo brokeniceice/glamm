@@ -103,6 +103,8 @@ def load_model(config: dict, checkpoint_path: Path, device: torch.device,
         if not rine_path.is_absolute():
             rine_path = REPO_ROOT / rine_path
         model.enable_rine_conditioning(rine_path.resolve())
+    elif config.get("forensics", {}).get("classifier") == "4096 -> 512 -> ReLU -> 2":
+        model.enable_h2_classification_head()
     state = torch.load(checkpoint_path, map_location="cpu")
     if int(state.get("optimizer_step", -1)) != expected_step or int(state.get("epoch", -1)) != expected_epoch:
         raise ValueError(

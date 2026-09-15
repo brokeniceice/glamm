@@ -86,6 +86,7 @@ def parse_args(argv=None):
     parser.add_argument("--local_rank", type=int, default=-1)
     parser.add_argument("--rine-conditioned-c1", action="store_true")
     parser.add_argument("--rine-checkpoint", default=None)
+    parser.add_argument("--h2-classifier", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -514,6 +515,10 @@ def main(argv=None):
     tokenizer = glamm_train.setup_tokenizer_and_special_tokens(args)
     model = glamm_train.initialize_model(args, tokenizer)
     model = glamm_train.prepare_model_for_training(model, tokenizer, args)
+    if cli.h2_classifier and cli.rine_conditioned_c1:
+        raise ValueError("--h2-classifier and --rine-conditioned-c1 are mutually exclusive")
+    if cli.h2_classifier:
+        model.enable_h2_classification_head()
     if cli.rine_conditioned_c1:
         if not cli.rine_checkpoint:
             raise ValueError("--rine-conditioned-c1 requires --rine-checkpoint")

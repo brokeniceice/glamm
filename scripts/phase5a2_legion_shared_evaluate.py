@@ -99,7 +99,7 @@ def target_mask(row: dict, height: int, width: int, target_kind: str) -> np.ndar
         if not result.any():
             raise RuntimeError(f"empty LOKI bbox-union target: {row.get('sample_id')}")
         return result
-    if target_kind not in ("synthscars_union", "internal_val_union"):
+    if target_kind not in ("synthscars_union", "internal_val_union", "internal_test_union"):
         raise RuntimeError(f"unsupported target kind: {target_kind}")
     global PROJECT_SYNTHSCARS_MODULE
     if PROJECT_SYNTHSCARS_MODULE is None:
@@ -207,7 +207,7 @@ def main() -> int:
     parser.add_argument("--condition", choices=("original", "jpeg70", "jpeg80", "gaussian5", "gaussian10"), required=True)
     parser.add_argument(
         "--target-kind",
-        choices=("synthscars_union", "loki_bbox_union", "internal_val_union"),
+        choices=("synthscars_union", "loki_bbox_union", "internal_val_union", "internal_test_union"),
         default="synthscars_union",
     )
     parser.add_argument("--start", type=int, required=True)
@@ -223,6 +223,7 @@ def main() -> int:
         "synthscars_union": 1000,
         "loki_bbox_union": 229,
         "internal_val_union": 1106,
+        "internal_test_union": 1104,
     }[args.target_kind]
     if len(sample_ids) != expected_n or len(set(sample_ids)) != expected_n:
         raise RuntimeError("shared manifest population drift")
@@ -230,6 +231,8 @@ def main() -> int:
         raise RuntimeError("LOKI supplement is frozen to original RGB only")
     if args.target_kind == "internal_val_union" and args.condition != "original":
         raise RuntimeError("internal-validation diagnostic is frozen to original RGB only")
+    if args.target_kind == "internal_test_union" and args.condition != "original":
+        raise RuntimeError("internal-test evaluation is frozen to original RGB only")
     if not 0 <= args.start < args.end <= len(manifest_rows):
         raise RuntimeError(f"invalid shard [{args.start}, {args.end})")
     expected_rgb_hashes = historical_corruption_hashes(args.condition)

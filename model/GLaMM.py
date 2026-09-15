@@ -235,6 +235,15 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
             self.forensic_projector.to(dtype=projector_dtype)
         self.forensic_evidence_token_count = 1
 
+    def enable_h2_classification_head(self, *, head_dtype=None):
+        """Install the frozen Phase 6D.3 C0 matched H2 classifier only."""
+        hidden = int(self.config.hidden_size)
+        self.classification_head = nn.Sequential(
+            nn.Linear(hidden, 512), nn.ReLU(), nn.Linear(512, 2)
+        )
+        if head_dtype is not None:
+            self.classification_head.to(dtype=head_dtype)
+
     def train(self, mode=True):
         super().train(mode)
         if hasattr(self, "rine_conditioner"):
@@ -247,7 +256,8 @@ class GLaMMForCausalLM(LlavaLlamaForCausalLM):
             return None
         self.rine_conditioner.eval()
         with torch.no_grad():
-            _, q2, _ = self.rine_conditioner(global_enc_images)
+            rine_logits, q2, _ = self.rine_conditioner(global_enc_images)
+        self._last_rine_binary_logits = rine_logits.detach().float().reshape(-1)
         projected = self.forensic_projector(q2.to(dtype=self.forensic_projector[0].weight.dtype))
         if projected.requires_grad:
             projected.register_hook(

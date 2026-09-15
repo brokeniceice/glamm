@@ -63,6 +63,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--local_rank", "--local-rank", type=int, default=0)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--seed", type=int, default=3407)
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--micro-batch", type=int, default=1)
+    parser.add_argument("--grad-accum", type=int, default=None)
+    parser.add_argument("--preflight-optimizer-steps", type=int, default=1)
     return parser.parse_args()
 
 
@@ -101,25 +105,36 @@ class WeightedLegionDataset(CompleteLegionDataset):
 
 
 class ExactDistributedSchedule:
-    """Equal-rank schedule with zero-weight padding and exact-once real samples."""
+    """Equal-step exact-once schedule with sample-mean preserving tail weights."""
 
-    def __init__(self, length: int, rank: int, world: int, grad_accum: int, seed: int, epoch: int):
+    def __init__(self, length: int, rank: int, world: int, grad_accum: int, seed: int, epoch: int,
+                 micro_batch: int = 1):
         rng = random.Random(seed + epoch)
         indices = list(range(length))
         rng.shuffle(indices)
-        global_slots = world * grad_accum
+        global_slots = world * micro_batch * grad_accum
         self.local: list[tuple[int, float, float]] = []
         for start in range(0, length, global_slots):
             group = indices[start:start + global_slots]
-            real_count = len(group)
-            scale = global_slots / real_count
-            padded = group + [group[0]] * (global_slots - real_count)
-            weights = [scale] * real_count + [0.0] * (global_slots - real_count)
+            total_real = len(group)
             for micro in range(grad_accum):
-                slot = micro * world + rank
-                self.local.append((padded[slot], weights[slot], float(weights[slot] > 0)))
-        self.real_weight_sum = sum(metric_weight for _, _, metric_weight in self.local)
-        self.padding_slots = sum(metric_weight == 0 for _, _, metric_weight in self.local)
+                begin = (micro * world + rank) * micro_batch
+                chunk = group[begin:begin + micro_batch]
+                local_count = len(chunk)
+                # DeepSpeed averages over ranks and accumulation microsteps.
+                # Scaling each local mean by world*grad*local_n/global_n makes
+                # the final partial optimizer group an exact global sample mean.
+                grad_weight = world * grad_accum * local_count / total_real if local_count else 0.0
+                metric_weight = float(local_count)
+                if chunk:
+                    self.local.extend((item, grad_weight, metric_weight) for item in chunk)
+                else:
+                    # Keep the same number of DDP collectives on every rank.
+                    # This branch is unreachable for the current 8971/16 tail
+                    # (11 samples), but guards more general small remainders.
+                    self.local.append((group[0], 0.0, 0.0))
+        self.real_weight_sum = sum(value[2] for value in self.local[::micro_batch])
+        self.padding_slots = 0
 
     def __iter__(self):
         return iter(self.local)
@@ -159,16 +174,16 @@ def official_args(cli: argparse.Namespace) -> argparse.Namespace:
     annotation_path = Path(cli.dataset_dir) / "train/annotations/train.json"
     train_count = len(json.loads(annotation_path.read_text(encoding="utf-8")))
     world = int(os.environ.get("WORLD_SIZE", "1"))
-    grad_accum = 8
-    steps = math.ceil(train_count / (world * grad_accum))
+    grad_accum = cli.grad_accum if cli.grad_accum is not None else 8
+    steps = math.ceil(train_count / (world * cli.micro_batch * grad_accum))
     values = [
         "--version", cli.base, "--dataset_dir", cli.dataset_dir,
         "--vision_pretrained", cli.vision_pretrained, "--vision-tower", cli.vision_tower,
         "--exp_name", "phase5a3_stage1", "--lora_r", "8", "--lr", "1e-4",
         "--ce_loss_weight", "1.0", "--dice_loss_weight", "0.2", "--bce_loss_weight", "0.4",
         "--pretrained", "--use_segm_data", "--seg_dataset", "Legion",
-        "--segm_sample_rates", "1", "--val_dataset", "Legion", "--epochs", "3",
-        "--batch_size", "1", "--val_batch_size", "1",
+        "--segm_sample_rates", "1", "--val_dataset", "Legion", "--epochs", str(cli.epochs),
+        "--batch_size", str(cli.micro_batch), "--val_batch_size", "1",
         "--grad_accumulation_steps", str(grad_accum), "--epoch_samples", str(train_count),
         "--steps_per_epoch", str(steps), "--workers", str(cli.workers),
         "--log_base_dir", cli.run_dir, "--local_rank", str(cli.local_rank),
@@ -189,9 +204,10 @@ def make_datasets(args, tokenizer):
     return train, val
 
 
-def make_loader(dataset, sampler, args, tokenizer, inference=False):
+def make_loader(dataset, sampler, args, tokenizer, inference=False, batch_size=None):
     return DataLoader(
-        dataset, batch_size=1, sampler=sampler, shuffle=False, num_workers=args.workers,
+        dataset, batch_size=(args.batch_size if not inference else 1) if batch_size is None else batch_size,
+        sampler=sampler, shuffle=False, num_workers=args.workers,
         pin_memory=False, collate_fn=lambda batch: weighted_collate(
             batch, tokenizer, args.local_rank, inference=inference
         ),
@@ -227,12 +243,37 @@ def validate(engine, loader) -> dict[str, float]:
         for packed in loader:
             batch, _, metric_weights, _ = prepare_batch(packed)
             output = engine(**batch)
-            weight = float(metric_weights.item())
+            # Validation loader is batch one.  Sum explicitly so this remains
+            # correct if a future caller batches it without scalar .item().
+            weight = float(metric_weights.sum().item())
             if weight:
                 for key in LOSS_KEYS:
-                    sums[key] += float(output[key].item())
-                count += 1.0
+                    sums[key] += float(output[key].item()) * weight
+                count += weight
     return reduce_sums(sums, count)
+
+
+def validation_smoke(engine, dataset, args, tokenizer, rank: int, world: int) -> dict[str, float]:
+    """Exercise the real validation-loss path before formal training starts."""
+    schedule = ExactValidationSchedule(len(dataset), rank, world)
+    # This is loss validation, not deployable inference.  Using
+    # ``inference=True`` enters LEGION._inference_path and returns predictions
+    # instead of the loss dictionary consumed by validate().
+    loader = make_loader(dataset, schedule, args, tokenizer, inference=False, batch_size=1)
+    engine.train()  # official loss path, with no gradients/updates below
+    packed = next(iter(loader))
+    batch, _, metric_weights, _ = prepare_batch(packed)
+    with torch.no_grad():
+        output = engine(**batch)
+    values = torch.tensor([float(output[key].item()) for key in LOSS_KEYS], device="cuda", dtype=torch.float64)
+    finite = torch.tensor(float(torch.isfinite(values).all()), device="cuda", dtype=torch.float64)
+    torch.distributed.all_reduce(values)
+    torch.distributed.all_reduce(finite, op=torch.distributed.ReduceOp.MIN)
+    if not bool(finite.item()):
+        raise RuntimeError("validation smoke produced non-finite loss")
+    return {key: float(values[i].item() / world) for i, key in enumerate(LOSS_KEYS)} | {
+        "metric_weight": float(metric_weights.sum().item())
+    }
 
 
 def train_epoch(engine, loader, args, epoch: int) -> dict[str, float]:
@@ -300,11 +341,10 @@ def main() -> None:
         # The official train() function calls model.train() before its first
         # forward; reproduce that exact state for the one-batch preflight too.
         engine.train()
-        schedule = ExactDistributedSchedule(len(train_dataset), rank, world, args.grad_accumulation_steps, cli.seed, 0)
+        schedule = ExactDistributedSchedule(len(train_dataset), rank, world, args.grad_accumulation_steps, cli.seed, 0,
+                                            args.batch_size)
         loader = make_loader(train_dataset, schedule, args, tokenizer)
         torch.cuda.reset_peak_memory_stats()
-        packed = next(iter(loader))
-        batch, gradient_weights, _, _ = prepare_batch(packed)
         # ZeRO-2 partitions/clears ``param.grad`` during backward, so inspecting
         # parameter.grad afterwards incorrectly reports no gradients.  Hooks
         # observe the tensors before DeepSpeed moves them into partition buffers.
@@ -316,10 +356,18 @@ def main() -> None:
         for param in engine.module.parameters():
             if param.requires_grad:
                 handles.append(param.register_hook(observe_gradient))
-        output = engine(**batch)
-        engine.backward(output["loss"] * gradient_weights[0])
+        iterator = iter(loader)
+        losses = []
+        for _ in range(cli.preflight_optimizer_steps * args.grad_accumulation_steps):
+            packed = next(iterator)
+            batch, gradient_weights, _, _ = prepare_batch(packed)
+            output = engine(**batch)
+            losses.append(float(output["loss"].item()))
+            engine.backward(output["loss"] * gradient_weights[0])
+            engine.step()
         for handle in handles:
             handle.remove()
+        smoke_losses = validation_smoke(engine, val_dataset, args, tokenizer, rank, world)
         finite_grad_tensors = grad_observation["finite"]
         nonzero_grad_tensors = grad_observation["nonzero"]
         record = {
@@ -327,7 +375,7 @@ def main() -> None:
             "source_commit": "d21535dd45f6fea509337a83095966f0b86ac924",
             "base": str(Path(cli.base).resolve()), "public_legion_LE_used": False,
             "train_count": len(train_dataset), "validation_count": len(val_dataset),
-            "world_size": world, "micro_batch_per_gpu": 1,
+            "world_size": world, "micro_batch_per_gpu": args.batch_size,
             "gradient_accumulation_steps": args.grad_accumulation_steps,
             "effective_global_batch": world * args.batch_size * args.grad_accumulation_steps,
             "epochs": args.epochs,
@@ -342,6 +390,10 @@ def main() -> None:
             "trainable_parameter_count": sum(value[2] for value in trainable),
             "trainable_parameters": [{"name": n, "shape": s, "numel": c} for n, s, c in trainable],
             "losses": {key: float(output[key].item()) for key in LOSS_KEYS},
+            "preflight_optimizer_steps": cli.preflight_optimizer_steps,
+            "preflight_microbatch_losses": losses,
+            "validation_loss_smoke": smoke_losses,
+            "validation_forward_contract": "inference=False, batch=1, torch.no_grad, no optimizer update",
             "finite_grad_tensors": finite_grad_tensors, "nonzero_grad_tensors": nonzero_grad_tensors,
             "peak_memory_bytes": torch.cuda.max_memory_allocated(),
             "gpu_name": torch.cuda.get_device_name(),
@@ -365,22 +417,36 @@ def main() -> None:
     for epoch in range(args.epochs):
         seed_all(cli.seed + epoch)
         schedule = ExactDistributedSchedule(
-            len(train_dataset), rank, world, args.grad_accumulation_steps, cli.seed, epoch
+            len(train_dataset), rank, world, args.grad_accumulation_steps, cli.seed, epoch, args.batch_size
         )
         loader = make_loader(train_dataset, schedule, args, tokenizer)
         val_schedule = ExactValidationSchedule(len(val_dataset), rank, world)
-        val_loader = make_loader(val_dataset, val_schedule, args, tokenizer)
+        # Validation selects by the native training loss and therefore must use
+        # the training/loss forward contract.  ``inference=True`` is reserved
+        # for mask prediction and does not return LOSS_KEYS.
+        val_loader = make_loader(val_dataset, val_schedule, args, tokenizer, inference=False, batch_size=1)
         torch.cuda.reset_peak_memory_stats()
         train_losses = train_epoch(engine, loader, args, epoch)
-        val_losses = validate(engine, val_loader)
         tag = f"epoch{epoch + 1}_global_step{(epoch + 1) * args.steps_per_epoch}"
+        # Persist the post-training state before validation.  Validation makes
+        # no parameter updates, so this is also the exact epoch checkpoint and
+        # remains recoverable if evaluator code or infrastructure fails.
+        recovery_state = {
+            "epoch": epoch + 1, "train_losses": train_losses,
+            "validation_status": "PENDING", "train_count": len(train_dataset),
+            "validation_count": len(val_dataset),
+        }
+        engine.save_checkpoint(str(checkpoint_root), tag=tag, client_state=recovery_state)
+        if rank == 0:
+            dump(run_dir / "validation_pending.json", {"tag": tag, **recovery_state})
+        torch.distributed.barrier()
+        val_losses = validate(engine, val_loader)
         client_state = {
             "epoch": epoch + 1, "train_losses": train_losses, "validation_losses": val_losses,
             "train_count": len(train_dataset), "validation_count": len(val_dataset),
             "zero_weight_padding_slots_global": world * sum(s.padding_slots for s in [schedule])
             if world == 1 else (world * args.grad_accumulation_steps - len(train_dataset) % (world * args.grad_accumulation_steps)) % (world * args.grad_accumulation_steps),
         }
-        engine.save_checkpoint(str(checkpoint_root), tag=tag, client_state=client_state)
         row = {
             **client_state, "tag": tag, "peak_memory_bytes": torch.cuda.max_memory_allocated(),
             "learning_rate": scheduler.get_last_lr()[0],
@@ -388,6 +454,9 @@ def main() -> None:
         history.append(row)
         if rank == 0:
             dump(run_dir / "history.json", history)
+            pending = run_dir / "validation_pending.json"
+            if pending.exists():
+                pending.unlink()
             print(json.dumps({"event": "epoch_complete", **row}), flush=True)
         torch.distributed.barrier()
 

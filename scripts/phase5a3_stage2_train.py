@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 import random
+import os
 import sys
 from pathlib import Path
 
@@ -39,6 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-json", required=True)
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--batch-size", type=int, required=True)
+    parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=3407)
     return parser.parse_args()
@@ -153,8 +155,12 @@ def load(cli: argparse.Namespace):
 
 def main() -> None:
     cli = parse_args()
-    if cli.batch_size != 64:
-        raise RuntimeError(f"Stage-2 protocol gate failed: per-device batch={cli.batch_size}, expected 64")
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if cli.batch_size * world_size != 64:
+        raise RuntimeError(f"Stage-2 protocol gate failed: effective batch={cli.batch_size * world_size}, expected 64")
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
     random.seed(cli.seed)
     np.random.seed(cli.seed)
     torch.manual_seed(cli.seed)
@@ -170,15 +176,15 @@ def main() -> None:
         raise RuntimeError("Stage-2 frozen train/validation count drift")
 
     if cli.mode == "preflight":
-        model.cuda()
+        model.cuda(local_rank)
         model.train()
         loader = DataLoader(train_dataset, batch_size=cli.batch_size, shuffle=False,
                             num_workers=cli.workers, pin_memory=False)
         batch = next(iter(loader))
         torch.cuda.reset_peak_memory_stats()
         outputs = model(
-            global_enc_images=batch["global_enc_images"].cuda().bfloat16(),
-            cls_gt_list=batch["cls_gt_list"].cuda(), train_cls=True,
+            global_enc_images=batch["global_enc_images"].cuda(local_rank).bfloat16(),
+            cls_gt_list=batch["cls_gt_list"].cuda(local_rank), train_cls=True,
         )
         outputs["loss"].backward()
         finite = torch.isfinite(outputs["loss"]).item()
@@ -190,10 +196,10 @@ def main() -> None:
             "status": "PASS" if finite and grad_nonzero else "FAIL",
             "initialization": str(Path(cli.stage1_le).resolve()),
             "public_legion_LE_used": False, "batch_size": cli.batch_size,
-            "per_device_batch": cli.batch_size, "world_size": 1,
+            "per_device_batch": cli.batch_size, "world_size": world_size,
             "gradient_accumulation_steps": 1, "effective_global_batch": cli.batch_size,
-            "epochs": 3, "steps_per_epoch": int(np.ceil(len(train_dataset) / cli.batch_size)),
-            "total_optimizer_steps": 3 * int(np.ceil(len(train_dataset) / cli.batch_size)),
+            "epochs": cli.epochs, "steps_per_epoch": int(np.ceil(len(train_dataset) / (cli.batch_size * world_size))),
+            "total_optimizer_steps": cli.epochs * int(np.ceil(len(train_dataset) / (cli.batch_size * world_size))),
             "learning_rate": 1e-3, "scheduler": "cosine", "weight_decay": 0.0,
             "loss": float(outputs["loss"].item()), "nonzero_grad_tensors": grad_nonzero,
             "peak_memory_bytes": torch.cuda.max_memory_allocated(),
@@ -207,14 +213,15 @@ def main() -> None:
             "trainable_parameters": [{"name": n, "shape": s, "numel": c} for n, s, c in trainable],
             "loader_firewall": {"internal_test": False, "official1000": False, "external_benchmark": False},
         }
-        dump(run_dir / f"preflight_batch{cli.batch_size}.json", record)
-        print(json.dumps({"event": "stage2_preflight_complete", **record}), flush=True)
+        if local_rank == 0:
+            dump(run_dir / f"preflight_batch{cli.batch_size}.json", record)
+            print(json.dumps({"event": "stage2_preflight_complete", **record}), flush=True)
         if record["status"] != "PASS":
             raise RuntimeError("Stage-2 preflight failed")
         return
 
     training_args = TrainingArguments(
-        output_dir=str(run_dir / "checkpoints"), num_train_epochs=3,
+        output_dir=str(run_dir / "checkpoints"), num_train_epochs=cli.epochs,
         per_device_train_batch_size=cli.batch_size, per_device_eval_batch_size=cli.batch_size,
         gradient_accumulation_steps=1, evaluation_strategy="epoch", save_strategy="epoch",
         logging_strategy="steps", logging_steps=20, learning_rate=1e-3, weight_decay=0.0,
@@ -237,16 +244,17 @@ def main() -> None:
         "status": "COMPLETE", "initialization": str(Path(cli.stage1_le).resolve()),
         "public_legion_LE_used": False, "train_count": len(train_dataset),
         "validation_count": len(val_dataset), "labels": {"real": 1, "fake": 0},
-        "epochs": 3, "lr": 1e-3, "scheduler": "cosine", "batch_size": cli.batch_size,
-        "steps_per_epoch": int(np.ceil(len(train_dataset) / cli.batch_size)),
+        "epochs": cli.epochs, "lr": 1e-3, "scheduler": "cosine", "batch_size": cli.batch_size,
+        "steps_per_epoch": int(np.ceil(len(train_dataset) / (cli.batch_size * world_size))),
         "trainable_parameter_count": sum(value[2] for value in trainable),
         "trainable_parameters": [{"name": n, "shape": s, "numel": c} for n, s, c in trainable],
         "validation_by_epoch": epoch_metrics, "best_checkpoint": trainer.state.best_model_checkpoint,
         "best_metric": trainer.state.best_metric, "train_metrics": result.metrics,
         "final_model": str(final_dir),
     }
-    dump(run_dir / "training_summary.json", summary)
-    print(json.dumps({"event": "stage2_complete", **summary}), flush=True)
+    if trainer.is_world_process_zero():
+        dump(run_dir / "training_summary.json", summary)
+        print(json.dumps({"event": "stage2_complete", **summary}), flush=True)
 
 
 if __name__ == "__main__":
