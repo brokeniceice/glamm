@@ -1,0 +1,32 @@
+experiment:
+  seed: 3407
+  output_root: outputs/phase6g0_multilevel_dense_clip_audit
+  cache_root: /data/yz/groundingLMM_official/cache/phase6g0_multilevel_dense_clip_audit
+clip:
+  checkpoint: checkpoints/phase5a1_legion/models/clip-vit-large-patch14-336_ce19dc912ca5cd21c8a653c79e251e808ccabcd1
+  layers:
+    early: {block_index: 5, hidden_state_index: 6}
+    middle: {block_index: 11, hidden_state_index: 12}
+    late: {block_index: 17, hidden_state_index: 18}
+    current_hidden_minus2: {block_index: 22, hidden_state_index: 23}
+data:
+  phase3c1_clip_cache: outputs/phase3c1_spatial_probe/cache/clip
+  train_fake: 8836
+  val_fake: 1106
+probe:
+  architecture: Conv2d(1024,1,1,bias=true)
+  optimizer: AdamW
+  learning_rate: 0.001
+  weight_decay: 0.0
+  epochs: 20
+  batch_size: 16
+  bce_weight: 2.0
+  dice_weight: 0.5
+  selector: max_val_fake_mean_foreground_iou
+  tie_break: max_val_fake_mean_foreground_f1
+cache: {shard_size: 32, storage_dtype: bfloat16}
+decision:
+  single_layer: paired_iou_ci_lower_gt_0_AND_paired_f1_ci_lower_gt_0
+  rescue: current_iou_le_0.10_AND_alternative_minus_current_iou_ge_0.10
+  complementarity: at_least_two_alternatives_each_rescue_ge_2pct_AND_rescue_jaccard_le_0.70_AND_gain_spearman_le_0.80
+firewall: {internal_test: false, official1000: false, ood: false, r1_training: false}

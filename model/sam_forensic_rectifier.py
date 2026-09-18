@@ -74,13 +74,32 @@ class GeometryAwareSAMRectifier(nn.Module):
         self.rectification.cross_attention.locality_sigma = float(locality_sigma)
 
     @staticmethod
-    def semantic_support(sam_coordinates: torch.Tensor, evidence_coordinates: torch.Tensor) -> torch.Tensor:
+    def semantic_support(
+        sam_coordinates: torch.Tensor,
+        evidence_coordinates: torch.Tensor,
+        evidence_valid: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if sam_coordinates.ndim == 2:
             sam_coordinates = sam_coordinates[None]
         if evidence_coordinates.ndim == 2:
             evidence_coordinates = evidence_coordinates[None]
-        minimum = evidence_coordinates.amin(dim=1)
-        maximum = evidence_coordinates.amax(dim=1)
+        if evidence_valid is None:
+            minimum = evidence_coordinates.amin(dim=1)
+            maximum = evidence_coordinates.amax(dim=1)
+        else:
+            valid = evidence_valid if evidence_valid.ndim == 2 else evidence_valid[None]
+            if valid.shape != evidence_coordinates.shape[:2]:
+                raise ValueError("evidence_valid/evidence_coordinates shape mismatch")
+            if not bool(valid.any(dim=1).all()):
+                raise ValueError("every sample must contain at least one valid evidence token")
+            minimum = torch.where(
+                valid[..., None], evidence_coordinates,
+                torch.full_like(evidence_coordinates, float("inf")),
+            ).amin(dim=1)
+            maximum = torch.where(
+                valid[..., None], evidence_coordinates,
+                torch.full_like(evidence_coordinates, float("-inf")),
+            ).amax(dim=1)
         return ((sam_coordinates >= minimum[:, None]) & (sam_coordinates <= maximum[:, None])).all(-1)
 
     def forward(
@@ -92,6 +111,7 @@ class GeometryAwareSAMRectifier(nn.Module):
         evidence_valid: torch.Tensor | None = None,
         *,
         enabled: bool = True,
+        semantic_support: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         if not enabled:
             return {
@@ -104,7 +124,17 @@ class GeometryAwareSAMRectifier(nn.Module):
             }
         semantic = image_embeddings.flatten(2).transpose(1, 2)
         forensic = evidence.flatten(2).transpose(1, 2)
-        support = self.semantic_support(sam_coordinates, evidence_coordinates)
+        expected = forensic.shape[:2]
+        if evidence_coordinates.shape[-2:] != (expected[1], 2):
+            raise ValueError("evidence/evidence_coordinates token-count mismatch")
+        if evidence_valid is not None and evidence_valid.shape[-1] != expected[1]:
+            raise ValueError("evidence/evidence_valid token-count mismatch")
+        support = (
+            self.semantic_support(sam_coordinates, evidence_coordinates, evidence_valid)
+            if semantic_support is None else semantic_support
+        )
+        if support.shape != semantic.shape[:2]:
+            raise ValueError("semantic_support must match flattened SAM tokens")
         rectified, attention, residual = self.rectification(
             semantic, forensic, sam_coordinates, evidence_coordinates,
             evidence_valid, support,
