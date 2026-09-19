@@ -1,0 +1,35 @@
+{
+  "seed": 3407,
+  "family": "PyTorch default Linear/Conv with matched final sigmoid head policy",
+  "A0": {
+    "params": 371803,
+    "state_sha256": "61bae3fcd13e4075130f19a48ba51f3530a2bc18e9bca9d529f57fb1affc6013",
+    "step0_gate": {
+      "n": 24616,
+      "mean": 0.4589958004956126,
+      "median": 0.45703125,
+      "std": 0.07958083179643136,
+      "min": 0.1533203125,
+      "max": 0.7890625,
+      "fraction_lt_0.1": 0.0,
+      "fraction_gt_0.9": 0.0,
+      "binary_entropy_mean": 0.6768639530155381
+    }
+  },
+  "A1": {
+    "params": 369461,
+    "state_sha256": "1e14815b4b204c6e11f4e11768a20a375d92c80c63e47c634d045fced8f2c0a1",
+    "step0_gate": {
+      "n": 24616,
+      "mean": 0.47792058295201356,
+      "median": 0.47865787148475647,
+      "std": 0.04041809995480129,
+      "min": 0.28388506174087524,
+      "max": 0.6465112566947937,
+      "fraction_lt_0.1": 0.0,
+      "fraction_gt_0.9": 0.0,
+      "binary_entropy_mean": 0.6888857557462476
+    }
+  },
+  "relative_param_difference": -0.0062990347038619915
+}

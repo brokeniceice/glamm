@@ -1,0 +1,18 @@
+{
+  "frozen": [
+    "C1",
+    "CLIP",
+    "fusion",
+    "projection",
+    "Interaction",
+    "Translator",
+    "gamma",
+    "SAM",
+    "q_seg producer"
+  ],
+  "deterministic": "hard geometry support",
+  "trainable_only": "Utility",
+  "translator_sha256": "74a0ed3f0c88577c5c53469b125061cd5dae7b8da4669dca0ecd5795390d4742",
+  "g15_checkpoint": "/home/yz/groundingLMM_official/outputs/phase6g15_residual_staged_optimization/arms/A2/selected_checkpoint.pt",
+  "g15_sha256": "1372de57c955cf9c51472a39b895582a21b2917cb39c8b7752e88375a811a6d8"
+}

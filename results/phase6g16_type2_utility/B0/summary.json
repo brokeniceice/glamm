@@ -1,0 +1,18 @@
+{
+  "metrics": {
+    "n": 1106,
+    "mean_foreground_iou": 0.1849050183033532,
+    "median_foreground_iou": 0.09015000733317802,
+    "mean_foreground_f1": 0.2614078002542062,
+    "global_foreground_iou": 0.20517609361584616,
+    "global_foreground_f1": 0.34049147622944254,
+    "threshold_logit": 0.0,
+    "aggregate_counts": {
+      "tp": 5093888,
+      "fp": 6419781,
+      "fn": 13313239
+    }
+  },
+  "expected_G15_A2_mean_iou": 0.18496412512767835,
+  "absolute_drift": 5.910682432513914e-05
+}

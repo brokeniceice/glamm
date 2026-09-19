@@ -1,0 +1,34 @@
+{
+  "R2": {
+    "max_abs_error": 0.0,
+    "mean_abs_error": 0.0,
+    "relative_L2_error": 0.0
+  },
+  "raw_translator_output": {
+    "max_abs_error": 1.9073486328125e-05,
+    "mean_abs_error": 1.1299392781438655e-06,
+    "relative_L2_error": 3.3365236618010385e-07
+  },
+  "actual_injected_correction": {
+    "max_abs_error": 1.5497207641601562e-06,
+    "mean_abs_error": 8.427544173628121e-08,
+    "relative_L2_error": 3.3617436656641075e-07
+  },
+  "S_rect": {
+    "max_abs_error": 1.5497207641601562e-06,
+    "mean_abs_error": 8.427544173628121e-08,
+    "relative_L2_error": 3.255725573581003e-07
+  },
+  "final_mask_logits": {
+    "max_abs_error": 0.1875,
+    "mean_abs_error": 0.016530955210328102,
+    "relative_L2_error": 0.004508033394813538
+  },
+  "precision": "FP32 Rectifier; final frozen-SAM input cast identically to BF16",
+  "tolerance": {
+    "core_relative_L2": 2e-06,
+    "final_mask_logits_relative_L2": 0.005,
+    "task_level": "full DEV mean IoU drift <= 5e-4"
+  },
+  "passed": true
+}
