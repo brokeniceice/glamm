@@ -18,7 +18,7 @@ Official1000仅在internal-validation selector冻结后访问；完成后STOP。
 
 ## Supplemental I2 — random utility + random rectifier
 
-I1 was not run. I2 reused the identical frozen C1 G0 query cache and used the same 10-epoch recipe/validation selector.
+I2 reused the identical frozen C1 G0 query cache and used the same 10-epoch recipe/validation selector. I1 results are recorded below.
 
 | Arm | Mean FG IoU | Mean FG F1 | Global FG IoU | Global FG F1 | SEG trigger |
 |---|---:|---:|---:|---:|---:|
@@ -31,3 +31,7 @@ I1仅将utility恢复为seed-3407随机初始化；rectifier严格复用Phase4F 
 | Arm | Mean FG IoU | Mean FG F1 | Global FG IoU | Global FG F1 | SEG trigger |
 |---|---:|---:|---:|---:|---:|
 | C1+I1 random-utility R1 | 0.317788 | 0.437676 | 0.332440 | 0.498995 | 0.992000 |
+
+## Main 与 I2 的最终配对选择
+
+1000 张 Official1000 样本的严格配对核查、bootstrap 区间及论文表述边界见[最终模型选择](phase6e2_main_vs_i2_final_selection.md)。

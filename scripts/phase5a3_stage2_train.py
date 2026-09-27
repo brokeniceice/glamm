@@ -43,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=3407)
+    parser.add_argument("--public-legion-le", action="store_true")
     return parser.parse_args()
 
 
@@ -195,9 +196,9 @@ def main() -> None:
         record = {
             "status": "PASS" if finite and grad_nonzero else "FAIL",
             "initialization": str(Path(cli.stage1_le).resolve()),
-            "public_legion_LE_used": False, "batch_size": cli.batch_size,
+            "public_legion_LE_used": cli.public_legion_le, "batch_size": cli.batch_size,
             "per_device_batch": cli.batch_size, "world_size": world_size,
-            "gradient_accumulation_steps": 1, "effective_global_batch": cli.batch_size,
+            "gradient_accumulation_steps": 1, "effective_global_batch": cli.batch_size * world_size,
             "epochs": cli.epochs, "steps_per_epoch": int(np.ceil(len(train_dataset) / (cli.batch_size * world_size))),
             "total_optimizer_steps": cli.epochs * int(np.ceil(len(train_dataset) / (cli.batch_size * world_size))),
             "learning_rate": 1e-3, "scheduler": "cosine", "weight_decay": 0.0,
@@ -238,11 +239,12 @@ def main() -> None:
     result = trainer.train()
     final_dir = run_dir / "final_model"
     trainer.save_model(str(final_dir))
-    tokenizer.save_pretrained(str(final_dir))
+    if trainer.is_world_process_zero():
+        tokenizer.save_pretrained(str(final_dir))
     epoch_metrics = [entry for entry in trainer.state.log_history if "eval_accuracy" in entry]
     summary = {
         "status": "COMPLETE", "initialization": str(Path(cli.stage1_le).resolve()),
-        "public_legion_LE_used": False, "train_count": len(train_dataset),
+        "public_legion_LE_used": cli.public_legion_le, "train_count": len(train_dataset),
         "validation_count": len(val_dataset), "labels": {"real": 1, "fake": 0},
         "epochs": cli.epochs, "lr": 1e-3, "scheduler": "cosine", "batch_size": cli.batch_size,
         "steps_per_epoch": int(np.ceil(len(train_dataset) / (cli.batch_size * world_size))),

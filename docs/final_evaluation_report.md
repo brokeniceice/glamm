@@ -1,113 +1,172 @@
-# Final Frozen Evaluation Report
+# Final Evaluation Report｜按数据集汇总
 
-Generated: `2026-09-08T09:00:59.613123+00:00`
+更新：2026-09-26。数值保留六位小数；`-` 表示缺少可报告结果或指标不适用。每个数据集单独一表；分类展示九个模型及 C1-raw 诊断口径，定位展示六个模型。
 
-## Data leakage warning
+## 口径与模型
 
-The frozen leakage audit status is **BLOCKED_OVERLAP**. Evaluation proceeded because `leakage_override.json` is **ACTIVE**, under the recorded user authorization. This is an override, not a passed leakage audit.
+- **P1-old R1** 指 P1 上的旧 R1；它只修改 `[SEG]` 后的定位路径，分类权重与 P1 相同。外部分类原记录名为 `r1`，P1 行按分类不变性精确复用，并非第二次推理。
+- **C1-native R1** 指从 C1 出发，依次预训练 Rectifier、Utility 后联合训练的 Phase6E.3 模型。分类主口径固定为 **C1-center**：C1 H2 logit margin 大于 internal-TRAIN 均值 `-9.190834884678093` 判 Fake；R1 不改变分类。
+- **C1-raw** 是同一 C1 分类头在中心化之前的原始判定：H2 Fake−Real logit margin `> 0` 判 Fake。它与 C1-native R1 行使用相同的 C1 权重和逐图分数，只改变判定阈值；作为诊断口径列出，最终 C1 分类架构与主结果仍为 **C1-center**。正比例标准差缩放不改变 ROC-AUC，因此两个口径的 ROC-AUC 相同。
+- **legion-retrained-match** 为独立重训练的 matched 版本。其 X-AIGD/PAL4VST 结果 JSON 的旧字段仍写 `model: legion_retrained`，但 checkpoint 角色与路径指向 `legion_retrained_match_stage1_LE`。
+- **legion-intermediate + aligned Stage-2** 以作者公开 `legion_LE` 第一阶段中间权重为起点，按 `legion-retrained` 的第二阶段配方在本项目数据上训练分类头；分类表使用该完整模型的冻结评测。定位表中的 **legion-intermediate** 仍指原始公开 LE 中间权重，未替换为第二阶段模型。原始公开 LE 单独没有已训练的分类头。
+- **RINE-official-224** 使用官方 RINE 模型、OpenAI CLIP `ViT-L/14` 224 权重和官方 224 图像变换，在本项目数据上从随机 RINE 分类头训练一轮；官方发布的 RINE 分类头权重未用于初始化。40 张尺寸不足 224 的 Real 训练图像按预注册规则排除，实际训练 17,632 张。
+- **NPR-official-retrained** 指独立 NPR 基线：直接使用固定官方 NPR ResNet 源码，在本项目 17,672 张内部训练图上随机初始化、训练 50 轮，固定最后一轮权重；仅有分类输出。
+- **RINE-336-adapted** 指既有 `RINE-on-C1` 独立分类器：官方 RINE Q1/TIE/Q2/head 结构适配冻结的项目 CLIP ViT-L/14@336，在全部 17,672 张内部训练图像上训练一轮。它与最终 C1-center 共享 RINE 来源，但此行是 RINE 自身的分类输出，而非 C1-center 输出。
 
-External benchmark ↔ internal train: **779 exact SHA256 overlaps** and **793 pHash near-overlap pairs** (frozen Hamming threshold from the data audit). No overlapping sample was removed by the evaluation scripts.
+C1-raw、NPR、公开 LE 第二阶段和两个 RINE 行只用于分类比较。两个 RINE 版本的 CLIP 权重、输入尺寸、图像变换及训练样本范围不同，因此其数值差异不能单独归因于分辨率或轮数。各分类表沿用相同测试清单和 Fake 正类；C1-raw 使用原始 margin 阈值 `0`，C1-center 使用上面注明的冻结中心阈值，其他概率型分类行使用阈值 `0.5`。
 
-Affected-dataset exact counts: `{"AIGI-Holmes-TestSet": 779}`  
-Affected-dataset pHash counts: `{"AIGI-Holmes-TestSet": 784, "GenImage-heldout": 7, "LOKI-classification": 1, "PAL4VST-test": 1}`
+## 分类｜内部测试集
 
-AIGI-Holmes TestSet ↔ GenImage held-out: **0 exact** and **35 pHash near-overlap pairs**.
+### Internal2208（Real 1104，Fake 1104）
 
-## Classification
+| 模型 | N | Accuracy | F1 | ROC-AUC | Fake recall | TNR | FPR |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| P1 | 2208 | 0.983696 | 0.983621 | 0.998389 | 0.979167 | 0.988225 | 0.011775 |
+| P1-old R1 | 2208 | 0.983696 | 0.983621 | 0.998389 | 0.979167 | 0.988225 | 0.011775 |
+| C1-raw | 2208 | 0.995924 | 0.995926 | 0.999550 | 0.996377 | 0.995471 | 0.004529 |
+| C1-native R1 | 2208 | 0.991848 | 0.991906 | 0.999550 | 0.999094 | 0.984601 | 0.015399 |
+| legion-retrained | 2208 | 0.986413 | 0.986486 | 0.999258 | 0.991848 | 0.980978 | 0.019022 |
+| legion-retrained-match | 2208 | 0.989130 | 0.989140 | 0.999241 | 0.990036 | 0.988225 | 0.011775 |
+| legion-intermediate + aligned Stage-2 | 2208 | 0.987772 | 0.987821 | 0.999283 | 0.991848 | 0.983696 | 0.016304 |
+| RINE-official-224 | 2208 | 0.981431 | 0.981423 | 0.998414 | 0.980978 | 0.981884 | 0.018116 |
+| RINE-336-adapted | 2208 | 0.993207 | 0.993246 | 0.999874 | 0.999094 | 0.987319 | 0.012681 |
+| NPR-official-retrained | 2208 | 0.949728 | 0.950336 | 0.988020 | 0.961957 | 0.937500 | 0.062500 |
 
-LEGION public intermediate classification is **N/A: the released legion_LE intermediate checkpoint is LE-only and has no trained prediction_head**.
+C1-raw 内部行与冻结的 2,208 条 C1 分数逐样本复核，TP/TN/FP/FN = `1100/1099/5/4`；C1-native R1 行按 C1-center 阈值复算为 `1103/1087/17/1`。两行都是同一分数的后处理，没有重新推理。
 
-| Dataset | Model | Execution | N | Real | Fake | Accuracy | F1 | ROC-AUC | TNR | FPR |
-|---|---|---|---|---|---|---|---|---|---|---|
-| aigi_holmes | legion_intermediate | N/A_NO_CLASSIFICATION_HEAD | 99999 | 50000 | 49999 | N/A | N/A | N/A | N/A | N/A |
-| aigi_holmes | legion_retrained | RUN_NEW | 99999 | 50000 | 49999 | 0.888109 | 0.875091 | 0.976110 | 0.992320 | 0.007680 |
-| aigi_holmes | r1 | RUN_NEW | 99999 | 50000 | 49999 | 0.831168 | 0.797995 | 0.956480 | 0.995380 | 0.004620 |
-| genimage | legion_intermediate | N/A_NO_CLASSIFICATION_HEAD | 100000 | 50000 | 50000 | N/A | N/A | N/A | N/A | N/A |
-| genimage | legion_retrained | RUN_NEW | 100000 | 50000 | 50000 | 0.729160 | 0.637779 | 0.931478 | 0.981440 | 0.018560 |
-| genimage | r1 | RUN_NEW | 100000 | 50000 | 50000 | 0.641980 | 0.455317 | 0.871324 | 0.984680 | 0.015320 |
-| internal | legion_intermediate | N/A_NO_CLASSIFICATION_HEAD | 2208 | 1104 | 1104 | N/A | N/A | N/A | N/A | N/A |
-| internal | legion_retrained | REUSED_HISTORICAL | 2208 | 1104 | 1104 | 0.986413 | 0.986486 | 0.999258 | 0.980978 | 0.019022 |
-| internal | p1 | REUSED_HISTORICAL | 2208 | 1104 | 1104 | 0.983696 | 0.983621 | 0.998389 | 0.988225 | 0.011775 |
-| internal | r1 | EXACT_REUSE_P1 | 2208 | 1104 | 1104 | 0.983696 | 0.983621 | 0.998389 | 0.988225 | 0.011775 |
-| loki | legion_intermediate | N/A_NO_CLASSIFICATION_HEAD | 2217 | 900 | 1317 | N/A | N/A | N/A | N/A | N/A |
-| loki | legion_retrained | RUN_NEW | 2217 | 900 | 1317 | 0.583672 | 0.559847 | 0.681164 | 0.785556 | 0.214444 |
-| loki | r1 | RUN_NEW | 2217 | 900 | 1317 | 0.542625 | 0.472973 | 0.654220 | 0.831111 | 0.168889 |
-| raise998 | legion_intermediate | N/A_NO_CLASSIFICATION_HEAD | 998 | 998 | 0 | N/A | N/A | N/A | N/A | N/A |
-| raise998 | legion_retrained | RUN_NEW | 998 | 998 | 0 | 0.988978 | 0.000000 | N/A | 0.988978 | 0.011022 |
-| raise998 | r1 | RUN_NEW | 998 | 998 | 0 | 0.993988 | 0.000000 | N/A | 0.993988 | 0.006012 |
+## 分类｜外部 OOD
 
-RAISE998 is a **Real-only OOD false-positive benchmark**. Its meaningful primary quantities are TNR/FPR (and TN/FP); it is not described as a balanced-accuracy benchmark.
+### AIGI-Holmes TestSet（Real 50,000，Fake 49,999）
 
-## Localization
+| 模型 | N | Accuracy | F1 | ROC-AUC | Fake recall | TNR | FPR |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| P1 | 99999 | 0.831168 | 0.797995 | 0.956480 | 0.666953 | 0.995380 | 0.004620 |
+| P1-old R1 | 99999 | 0.831168 | 0.797995 | 0.956480 | 0.666953 | 0.995380 | 0.004620 |
+| C1-raw | 99999 | 0.836468 | 0.804649 | 0.979485 | 0.673593 | 0.999340 | 0.000660 |
+| C1-native R1 | 99999 | 0.908289 | 0.899501 | 0.979485 | 0.820856 | 0.995720 | 0.004280 |
+| legion-retrained | 99999 | 0.888109 | 0.875091 | 0.976110 | 0.783896 | 0.992320 | 0.007680 |
+| legion-retrained-match | 99999 | 0.867959 | 0.848672 | 0.975100 | 0.740515 | 0.995400 | 0.004600 |
+| legion-intermediate + aligned Stage-2 | 99999 | 0.883919 | 0.869728 | 0.974483 | 0.774995 | 0.992840 | 0.007160 |
+| RINE-official-224 | 99999 | 0.765968 | 0.695293 | 0.985019 | 0.534031 | 0.997900 | 0.002100 |
+| RINE-336-adapted | 99999 | 0.884399 | 0.869632 | 0.991609 | 0.771135 | 0.997660 | 0.002340 |
+| NPR-official-retrained | 99999 | 0.782098 | 0.734501 | 0.909928 | 0.602832 | 0.961360 | 0.038640 |
 
-Inference-condition boundary: SynthScars reuses historical **P1/R1 G0**; LOKI reuses historical **P1/R1 G1**; the new X-AIGD and PAL4VST runs use **P1/R1 G1** as explicitly frozen for this final evaluation. LEGION public-intermediate and LEGION-retrained use official **L-FREE** throughout. Therefore P1/R1-vs-LEGION numbers are cross-protocol comparisons rather than identical-prompt comparisons.
+**泄漏提示：**此 TestSet 与原 internal-TRAIN 存在 779 个 exact SHA256 重叠；RINE-official-224 排除 40 张小图后，其实际训练清单仍有 775 个 exact 重叠。这些样本未从评测中删除。
 
-| Dataset | Model | Condition | Execution | N | Empty-GT | GT type | Mean FG IoU | Mean FG IoU (nonempty GT) | Mean FG F1 | Global FG IoU | Global FG F1 |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| loki | legion_intermediate | L-FREE | REUSED_HISTORICAL | 229 | 0 | bounding_box_union | 0.098816 | 0.098816 | 0.160061 | 0.116530 | 0.208735 |
-| loki | legion_retrained | L-FREE | REUSED_HISTORICAL | 229 | 0 | bounding_box_union | 0.079178 | 0.079178 | 0.127911 | 0.124314 | 0.221137 |
-| loki | p1 | G1 | REUSED_HISTORICAL | 229 | 0 | bounding_box_union | 0.076893 | 0.076893 | 0.126401 | 0.077554 | 0.143945 |
-| loki | r1 | G1 | REUSED_HISTORICAL | 229 | 0 | bounding_box_union | 0.061839 | 0.061839 | 0.103666 | 0.045873 | 0.087722 |
-| pal4vst | legion_intermediate | L-FREE | RUN_NEW | 1441 | 313 | official_pixel_artifact_mask | 0.059880 | 0.076495 | 0.095279 | 0.061973 | 0.116714 |
-| pal4vst | legion_retrained | L-FREE | RUN_NEW | 1441 | 313 | official_pixel_artifact_mask | 0.050836 | 0.064942 | 0.081036 | 0.045726 | 0.087454 |
-| pal4vst | p1 | G1 | RUN_NEW | 1441 | 313 | official_pixel_artifact_mask | 0.061279 | 0.076509 | 0.094792 | 0.052402 | 0.099585 |
-| pal4vst | r1 | G1 | RUN_NEW | 1441 | 313 | official_pixel_artifact_mask | 0.097387 | 0.103134 | 0.138952 | 0.094196 | 0.172175 |
-| synthscars | legion_intermediate | L-FREE | REUSED_HISTORICAL | 1000 | 0 | official_polygon_union | 0.223234 | 0.223234 | 0.321147 | 0.241450 | 0.388980 |
-| synthscars | legion_retrained | L-FREE | REUSED_HISTORICAL | 1000 | 0 | official_polygon_union | 0.196195 | 0.196195 | 0.286687 | 0.200490 | 0.334014 |
-| synthscars | p1 | G0 | REUSED_HISTORICAL | 1000 | 0 | official_polygon_union | 0.229544 | 0.229544 | 0.319323 | 0.236949 | 0.383118 |
-| synthscars | r1 | G0 | REUSED_HISTORICAL | 1000 | 0 | official_polygon_union | 0.286588 | 0.286588 | 0.393974 | 0.267042 | 0.421521 |
-| xaigd | legion_intermediate | L-FREE | RUN_NEW | 2419 | 247 | official_human_artifact_polygon_union | 0.083862 | 0.093399 | 0.129184 | 0.090972 | 0.166773 |
-| xaigd | legion_retrained | L-FREE | RUN_NEW | 2419 | 247 | official_human_artifact_polygon_union | 0.077187 | 0.085964 | 0.119954 | 0.079918 | 0.148008 |
-| xaigd | p1 | G1 | RUN_NEW | 2419 | 247 | official_human_artifact_polygon_union | 0.071161 | 0.078332 | 0.109794 | 0.070236 | 0.131253 |
-| xaigd | r1 | G1 | RUN_NEW | 2419 | 247 | official_human_artifact_polygon_union | 0.080213 | 0.079206 | 0.119900 | 0.059704 | 0.112680 |
+### GenImage held-out（Real 50,000，Fake 50,000）
 
-### Localization GT semantics
+| 模型 | N | Accuracy | F1 | ROC-AUC | Fake recall | TNR | FPR |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| P1 | 100000 | 0.641980 | 0.455317 | 0.871324 | 0.299280 | 0.984680 | 0.015320 |
+| P1-old R1 | 100000 | 0.641980 | 0.455317 | 0.871324 | 0.299280 | 0.984680 | 0.015320 |
+| C1-raw | 100000 | 0.706470 | 0.587849 | 0.928839 | 0.418660 | 0.994280 | 0.005720 |
+| C1-native R1 | 100000 | 0.809400 | 0.769929 | 0.928839 | 0.637840 | 0.980960 | 0.019040 |
+| legion-retrained | 100000 | 0.729160 | 0.637779 | 0.931478 | 0.476880 | 0.981440 | 0.018560 |
+| legion-retrained-match | 100000 | 0.676750 | 0.530303 | 0.926752 | 0.364960 | 0.988540 | 0.011460 |
+| legion-intermediate + aligned Stage-2 | 100000 | 0.705230 | 0.591431 | 0.926150 | 0.426700 | 0.983760 | 0.016240 |
+| RINE-official-224 | 100000 | 0.581940 | 0.307045 | 0.888290 | 0.185240 | 0.978640 | 0.021360 |
+| RINE-336-adapted | 100000 | 0.773820 | 0.712641 | 0.963910 | 0.560920 | 0.986720 | 0.013280 |
+| NPR-official-retrained | 100000 | 0.667250 | 0.560209 | 0.755341 | 0.423860 | 0.910640 | 0.089360 |
 
-- **SynthScars Official1000:** official per-reference polygons, unioned by the evaluator at original resolution.
-- **X-AIGD labeled_test:** official human perceptual-artifact polygons. Official records with `labels=[]` are retained and evaluated as all-zero GT masks, matching the official evaluator. Raw polygons remain authoritative; rasterization follows the official int32/clamping + `cv2.fillPoly` policy. For paper-level X-AIGD comparison, dataset-global FG IoU/F1 are the primary category-agnostic metrics; per-image means are supplementary.
-- **PAL4VST test:** official pixel artifact masks.
-- **LOKI229:** union of 687 official regional bounding boxes on 229 Fake images. This is box-derived localization GT and is not semantically equivalent to X-AIGD/PAL4VST perceptual-artifact masks.
+八个生成器的分组结果保存在各模型原始分类结果中；此处只列完整 held-out 总体指标。
 
-## GenImage per-generator classification
+### LOKI 分类（Real 900，Fake 1,317）
 
-| Model | Generator | N | Real | Fake | Accuracy | F1 | ROC-AUC | TNR | FPR |
-|---|---|---|---|---|---|---|---|---|---|
-| legion_retrained | adm | 12000 | 6000 | 6000 | 0.622000 | 0.411673 | 0.875066 | 0.979500 | 0.020500 |
-| legion_retrained | biggan | 12000 | 6000 | 6000 | 0.755000 | 0.682231 | 0.962562 | 0.984000 | 0.016000 |
-| legion_retrained | glide | 12000 | 6000 | 6000 | 0.760167 | 0.691599 | 0.952912 | 0.982500 | 0.017500 |
-| legion_retrained | midjourney | 12000 | 6000 | 6000 | 0.806750 | 0.766771 | 0.950696 | 0.978167 | 0.021833 |
-| legion_retrained | sdv4 | 12000 | 6000 | 6000 | 0.787667 | 0.736068 | 0.962765 | 0.983167 | 0.016833 |
-| legion_retrained | sdv5 | 16000 | 8000 | 8000 | 0.792125 | 0.743443 | 0.962061 | 0.981875 | 0.018125 |
-| legion_retrained | vqdm | 12000 | 6000 | 6000 | 0.578083 | 0.293173 | 0.836111 | 0.981167 | 0.018833 |
-| legion_retrained | wukong | 12000 | 6000 | 6000 | 0.710500 | 0.603153 | 0.938608 | 0.981000 | 0.019000 |
-| r1 | adm | 12000 | 6000 | 6000 | 0.526667 | 0.129102 | 0.754379 | 0.983167 | 0.016833 |
-| r1 | biggan | 12000 | 6000 | 6000 | 0.753500 | 0.678967 | 0.961975 | 0.985667 | 0.014333 |
-| r1 | glide | 12000 | 6000 | 6000 | 0.622500 | 0.408925 | 0.889720 | 0.983833 | 0.016167 |
-| r1 | midjourney | 12000 | 6000 | 6000 | 0.713250 | 0.605345 | 0.908792 | 0.986667 | 0.013333 |
-| r1 | sdv4 | 12000 | 6000 | 6000 | 0.688250 | 0.556911 | 0.915984 | 0.984667 | 0.015333 |
-| r1 | sdv5 | 16000 | 8000 | 8000 | 0.688562 | 0.557735 | 0.918437 | 0.984375 | 0.015625 |
-| r1 | vqdm | 12000 | 6000 | 6000 | 0.518833 | 0.101183 | 0.766515 | 0.983500 | 0.016500 |
-| r1 | wukong | 12000 | 6000 | 6000 | 0.608750 | 0.372074 | 0.839156 | 0.985667 | 0.014333 |
+| 模型 | N | Accuracy | F1 | ROC-AUC | Fake recall | TNR | FPR |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| P1 | 2217 | 0.542625 | 0.472973 | 0.654220 | 0.345482 | 0.831111 | 0.168889 |
+| P1-old R1 | 2217 | 0.542625 | 0.472973 | 0.654220 | 0.345482 | 0.831111 | 0.168889 |
+| C1-raw | 2217 | 0.625169 | 0.585949 | 0.751232 | 0.446469 | 0.886667 | 0.113333 |
+| C1-native R1 | 2217 | 0.718088 | 0.734156 | 0.751232 | 0.655277 | 0.810000 | 0.190000 |
+| legion-retrained | 2217 | 0.583672 | 0.559847 | 0.681164 | 0.445710 | 0.785556 | 0.214444 |
+| legion-retrained-match | 2217 | 0.561119 | 0.513257 | 0.680319 | 0.389522 | 0.812222 | 0.187778 |
+| legion-intermediate + aligned Stage-2 | 2217 | 0.576906 | 0.547297 | 0.679072 | 0.430524 | 0.791111 | 0.208889 |
+| RINE-official-224 | 2217 | 0.505187 | 0.398904 | 0.621919 | 0.276386 | 0.840000 | 0.160000 |
+| RINE-336-adapted | 2217 | 0.678845 | 0.678410 | 0.777690 | 0.570235 | 0.837778 | 0.162222 |
+| NPR-official-retrained | 2217 | 0.562923 | 0.531658 | 0.645753 | 0.417616 | 0.775556 | 0.224444 |
 
-## Benchmark integrity
+### RAISE998（Real 998，Fake 0）
 
-| Dataset | Task | N | Manifest SHA256 | Revision |
-|---|---|---|---|---|
-| Internal2208 | classification | 2208 | fbc2d422c45fc871e06ed82d7b4c8fab88f1ed9e83d523a56591c93173ddd174 | "unified_forensics_split_v1" |
-| SynthScars | localization | 1000 | b50dfae4a1a8691bb45da986a3648ebddb5f0cac0d55da0ad03aa30ae41fafb3 | "ee1cd553c2403f551fb1da60745cb2cdcb975e74" |
-| X-AIGD | localization | 2419 | ab442977c11acb15ee2573b0aa2d2f8e22bb428c2bf2fe5298abd146bffb5c49 | "92180f32030507ab54a40d6f1b88f39d6cec8178" |
-| PAL4VST | localization | 1441 | 2fbe8d273f09fa5db473d93c30762de3ca5369f9ee462d26bf383ce5812fa280 | "GitHub 9db472581715024e4fb69af7ffd2d64b5230bbef; Drive file 1h2geaBGrQVNKrjNPUs0oWdE5vXhdwTn_" |
-| LOKI-localization | localization | 229 | bf6f9f12660fe1082c000b4760514391a4ab0730bb08beaf8b82cb26132fcf15 | {"huggingface": "314ddacc5080b024d6b8d962b448065cd54c9f42", "git": "9b2dac636e660aa5fd158be7888abaf3dd268140"} |
-| LOKI-classification | classification | 2217 | 9376271a34603ff0ebcb7b21d9fc9a9219d7e28e4d350ffff6f8612d2a953c17 | {"huggingface": "314ddacc5080b024d6b8d962b448065cd54c9f42", "git": "9b2dac636e660aa5fd158be7888abaf3dd268140"} |
-| AIGI-Holmes | classification | 99999 | 380325bc0cbba1e80044d0d2dbb40ff2f788865288bb47402c1d4b7967431982 | "3e856ce5ed44ac3b578bf36434829ea42953be02" |
-| GenImage | classification | 100000 | f7844320a3d358e62cb709a13fc1b10f10786a59c400febd26bd4f02091cbcf7 | "71c983e6262684bc2c6b6af99582e8f568c259a5" |
-| RAISE998 | classification | 998 | d792f5e684abc42cbddd8466019576a2b6ee9fd53c7fcbe5354322a94caa4e49 | "RAISE-1k official TIFF selection manifest" |
+| 模型 | N | Accuracy | F1 | ROC-AUC | Fake recall | TNR | FPR |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| P1 | 998 | 0.993988 | - | - | - | 0.993988 | 0.006012 |
+| P1-old R1 | 998 | 0.993988 | - | - | - | 0.993988 | 0.006012 |
+| C1-raw | 998 | 1.000000 | - | - | - | 1.000000 | 0.000000 |
+| C1-native R1 | 998 | 0.998998 | - | - | - | 0.998998 | 0.001002 |
+| legion-retrained | 998 | 0.988978 | - | - | - | 0.988978 | 0.011022 |
+| legion-retrained-match | 998 | 0.992986 | - | - | - | 0.992986 | 0.007014 |
+| legion-intermediate + aligned Stage-2 | 998 | 0.991984 | - | - | - | 0.991984 | 0.008016 |
+| RINE-official-224 | 998 | 1.000000 | - | - | - | 1.000000 | 0.000000 |
+| RINE-336-adapted | 998 | 0.998998 | - | - | - | 0.998998 | 0.001002 |
+| NPR-official-retrained | 998 | 0.990982 | - | - | - | 0.990982 | 0.009018 |
 
-## Final frozen protocol
+该集只有 Real；主要阅读 TNR/FPR。Fake recall、F1 和 ROC-AUC 无法作双类解释，统一记为 `-`。
 
-Localization: SynthScars Official1000; X-AIGD official `labeled_test`; PAL4VST official `test`; LOKI229. Models: P1, R1, public intermediate LEGION, and LEGION-retrained.
+同一 C1 分数下，raw 口径的 Internal2208 Accuracy 比 center 高 `0.004076`；AIGI-Holmes、GenImage、LOKI 三个双类 OOD 集分别低 `0.071821`、`0.102930`、`0.092919`。RAISE998 的 raw FPR 为 `0`，center 为 `0.001002`。这些差异只由固定决策阈值改变产生。
 
-Classification: Internal2208 (historical frozen reuse), AIGI-Holmes official TestSet, GenImage official held-out partition, LOKI classification, and RAISE998 Real-only. The old project-created `AIGI-test` is not used as the main official benchmark.
+## 定位｜官方1000
 
-No threshold tuning, benchmark-dependent sample filtering, test resplitting, or model selection is performed by the finalizer.
+### SynthScars Official1000（官方 polygon union，空 GT 0）
 
+| 模型 | 条件 | N | Mean FG IoU | Mean FG F1 | Global FG IoU | Global FG F1 |
+|---|---|---:|---:|---:|---:|---:|
+| P1 | G0 | 1000 | 0.229544 | 0.319323 | 0.236949 | 0.383118 |
+| P1-old R1 | G0 | 1000 | 0.286588 | 0.393974 | 0.267042 | 0.421521 |
+| C1-raw | G0 | 1000 | 0.206240 | 0.291229 | 0.190361 | 0.319838 |
+| C1-native R1 | G0 | 1000 | 0.318875 | 0.439764 | 0.350363 | 0.518917 |
+| legion-retrained | L-FREE | 1000 | 0.196195 | 0.286687 | 0.200490 | 0.334014 |
+| legion-retrained-match | L-FREE | 1000 | 0.177485 | 0.259904 | 0.210989 | 0.348457 |
+| legion-intermediate | L-FREE | 1000 | 0.223234 | 0.321147 | 0.241450 | 0.388980 |
+
+P1、P1-old R1、C1-native R1 为 canonical G0；三个 LEGION 模型为官方 L-FREE。legion-retrained-match 使用的旧格式 manifest SHA 不同，但 1,000 个 sample ID 与顺序和冻结 Official1000 完全一致。C1-native R1 的 Official1000 曾用于历史候选比较，这里是已冻结结果汇总，不能称为全新独立测试。
+
+## 定位｜外部 OOD
+
+### LOKI229（687 个官方区域框在 229 张 Fake 图像上取 union；空 GT 0）
+
+| 模型 | 条件 | N | Mean FG IoU | Mean FG F1 | Global FG IoU | Global FG F1 |
+|---|---|---:|---:|---:|---:|---:|
+| P1 | G1 | 229 | 0.076893 | 0.126401 | 0.077554 | 0.143945 |
+| P1-old R1 | G1 | 229 | 0.061839 | 0.103666 | 0.045873 | 0.087722 |
+| C1-native R1 | G1 | 229 | 0.087661 | 0.139278 | 0.062531 | 0.117702 |
+| legion-retrained | L-FREE | 229 | 0.079178 | 0.127911 | 0.124314 | 0.221137 |
+| legion-retrained-match | L-FREE | 229 | 0.097270 | 0.154727 | 0.119893 | 0.214115 |
+| legion-intermediate | L-FREE | 229 | 0.098816 | 0.160061 | 0.116530 | 0.208735 |
+
+legion-retrained-match 使用的旧格式 LOKI manifest SHA 不同，但 229 个 sample ID 与顺序和冻结清单一致。LOKI 的框 union 与 X-AIGD/PAL4VST 的像素伪影 GT 语义不同。
+
+### X-AIGD labeled_test（官方人类感知伪影 polygon union；空 GT 247）
+
+| 模型 | 条件 | N | Mean FG IoU | Mean FG F1 | Global FG IoU | Global FG F1 |
+|---|---|---:|---:|---:|---:|---:|
+| P1 | G1 | 2419 | 0.071161 | 0.109794 | 0.070236 | 0.131253 |
+| P1-old R1 | G1 | 2419 | 0.080213 | 0.119900 | 0.059704 | 0.112680 |
+| C1-native R1 | G1 | 2419 | 0.083084 | 0.123880 | 0.075038 | 0.139601 |
+| legion-retrained | L-FREE | 2419 | 0.077187 | 0.119954 | 0.079918 | 0.148008 |
+| legion-retrained-match | L-FREE | 2419 | 0.084703 | 0.130600 | 0.094309 | 0.172363 |
+| legion-intermediate | L-FREE | 2419 | 0.083862 | 0.129184 | 0.090972 | 0.166773 |
+
+官方 `labels=[]` 样本保留为全零 GT。论文级 X-AIGD 类别无关比较应优先报告 Global FG IoU/F1，逐图均值为补充。
+
+### PAL4VST test（官方像素伪影 mask；空 GT 313）
+
+| 模型 | 条件 | N | Mean FG IoU | Mean FG F1 | Global FG IoU | Global FG F1 |
+|---|---|---:|---:|---:|---:|---:|
+| P1 | G1 | 1441 | 0.061279 | 0.094792 | 0.052402 | 0.099585 |
+| P1-old R1 | G1 | 1441 | 0.097387 | 0.138952 | 0.094196 | 0.172175 |
+| C1-native R1 | G1 | 1441 | 0.076464 | 0.113540 | 0.106225 | 0.192050 |
+| legion-retrained | L-FREE | 1441 | 0.050836 | 0.081036 | 0.045726 | 0.087454 |
+| legion-retrained-match | L-FREE | 1441 | 0.051007 | 0.082446 | 0.055633 | 0.105402 |
+| legion-intermediate | L-FREE | 1441 | 0.059880 | 0.095279 | 0.061973 | 0.116714 |
+
+官方空 GT 样本全部保留；逐图均值包含这些样本。
+
+## 解释边界与结果来源
+
+- 定位中 P1、P1-old R1、C1-native R1 在外部 OOD 使用 canonical known-Fake G1；LEGION 三模型使用 image-only L-FREE。跨模型提示条件不同，数值并非完全 matched 的同提示对照。统一报告完整 N、固定 mask logit 阈值 `> 0`；无 `[SEG]` 或无有效 mask 样本按零分计。
+- Mean FG 指逐图平均；Global FG 根据全数据集 TP/FP/FN 汇总。X-AIGD 与 PAL4VST 含空 GT，不能只看逐图均值，也不能把不同 GT 定义的数据集直接横比。
+- 泄漏审计状态为 **BLOCKED_OVERLAP**，已记录的继续评测 override 为 **ACTIVE**。外部清单相对原 internal-TRAIN 共 779 个 exact 重叠、793 对 pHash 近重叠；exact 重叠全在 AIGI-Holmes。RINE-official-224 的实际训练集排除 40 张小图后，AIGI-Holmes exact 重叠为 775。pHash 分布：AIGI-Holmes 784、GenImage 7、LOKI 分类 1、PAL4VST 1。AIGI-Holmes 与 GenImage 之间还有 35 对 pHash 近重叠。
+- 结果及逐样本来源：[原始四模型汇总](../outputs/final_evaluation/final_results.json)、[C1-native R1 汇总](../outputs/final_evaluation/c1_native_staged_r1/results.json)、[legion-retrained-match 汇总](../outputs/legion_retrained_match_evaluation/results.json)、[C1 内部测试逐样本分数](../outputs/phase6d5_decision_integration/raw_scores/internal_test.jsonl)、[C1 内部测试排序指标](../outputs/phase6d5_decision_integration/results.json)。数据集 manifest SHA256 与 revision 见原始四模型汇总的 `integrity` 字段；[C1 原生 R1 配对分析](phase6e3_c1_native_vs_original_c1_r1_official1000.md)另行报告。
+- C1-raw 外部四集的完整 TP/TN/FP/FN、ROC-AUC 与 manifest SHA256 见[Phase6D.5 全量分类 OOD 结果](../outputs/phase6d5_full_classification_ood/results.json)；[Phase6D.6 决策边界记录](phase6d6_decision_boundary_disentanglement.md)将其与 C1-center 放在相同样本上比较。内部测试复用上一条的 2,208 条冻结分数及 C1 原始阈值指标。
+- NPR 分类结果来源：[NPR 总结果](../outputs/npr_official_retrain/results.json)与[NPR 重训练记录](npr_official_retrain_results.md)。
+- 新增分类结果来源：[公开 LE + aligned Stage-2 汇总](../outputs/legion_public_le_stage2_evaluation/results.json)、[官方 RINE 224 重训练汇总](../outputs/rine_official224_retrain/results.json)、[RINE 336 外部 OOD 汇总](../outputs/phase6b7_rine_ood/results.json)、[RINE 336 内部测试汇总](../outputs/phase6d5_decision_integration/results.json)。训练与评测身份分别见[公开 LE 第二阶段记录](legion_public_le_stage2_evaluation.md)、[官方 RINE 224 记录](rine_official224_retrain_results.md)和[RINE 336 记录](phase6b7_rine_ood_results.md)。

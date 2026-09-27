@@ -26,20 +26,24 @@ def main() -> None:
     parser.add_argument("--datasets", nargs="+", choices=tuple(base.MANIFESTS), required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--model-dir", type=Path, default=MODEL)
+    parser.add_argument("--identity", type=Path, default=IDENTITY)
+    parser.add_argument("--output-root", type=Path, default=OUT)
+    parser.add_argument("--model-name", default="legion_retrained_match")
     args = parser.parse_args()
-    identity = json.loads(IDENTITY.read_text())
-    base.LEGION_CLS = MODEL
-    base.LEGION_CLS_IDENTITY = IDENTITY
+    identity = json.loads(args.identity.read_text())
+    base.LEGION_CLS = args.model_dir
+    base.LEGION_CLS_IDENTITY = args.identity
     base.LEGION_CLS_SHA = identity["canonical_sha256"]
     device = torch.device(args.device); torch.cuda.set_device(device)
-    status = OUT / ("worker_" + "_".join(args.datasets) + ".json")
+    status = args.output_root / ("worker_" + "_".join(args.datasets) + ".json")
     base.atomic(status, {"status": "RUNNING", "datasets": args.datasets, "pid": os.getpid(),
                          "device": str(device), "batch_size": args.batch_size,
-                         "checkpoint": str(MODEL.resolve()), "canonical_sha256": base.LEGION_CLS_SHA})
+                         "checkpoint": str(args.model_dir.resolve()), "canonical_sha256": base.LEGION_CLS_SHA})
     try:
         model, _, processor = base.load_legion(device)
         for name in args.datasets:
-            scope = base.scope(name); dest = OUT / name; predpath = dest / "predictions.jsonl"
+            scope = base.scope(name); dest = args.output_root / name; predpath = dest / "predictions.jsonl"
             old = base.rows(predpath) if predpath.exists() else []
             indexed = {row["sample_id"]: row for row in old}
             expected = {row["sample_id"] for row in scope}
@@ -62,12 +66,12 @@ def main() -> None:
             ordered = [indexed[row["sample_id"]] for row in scope]
             tmp = predpath.with_suffix(".jsonl.tmp")
             tmp.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in ordered)); os.replace(tmp, predpath)
-            result = {"status": "COMPLETE", "model": "legion_retrained_match", "dataset": name,
+            result = {"status": "COMPLETE", "model": args.model_name, "dataset": name,
                       "manifest": str(base.MANIFESTS[name].resolve()), "manifest_sha256": base.sha(base.MANIFESTS[name]),
-                      "checkpoint": {"path": str(MODEL.resolve()), "canonical_sha256": base.LEGION_CLS_SHA},
+                      "checkpoint": {"path": str(args.model_dir.resolve()), "canonical_sha256": base.LEGION_CLS_SHA},
                       "metrics": base.metrics(ordered)}
             base.atomic(dest / "results.json", result)
-        base.atomic(status, {"status": "COMPLETE", "datasets": args.datasets, "checkpoint": str(MODEL.resolve())})
+        base.atomic(status, {"status": "COMPLETE", "datasets": args.datasets, "checkpoint": str(args.model_dir.resolve())})
     except BaseException as error:
         base.atomic(status, {"status": "FAILED", "datasets": args.datasets,
                              "exception_type": type(error).__name__, "exception": str(error)})

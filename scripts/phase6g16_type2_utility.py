@@ -29,7 +29,7 @@ from tools.phase4c_b import inverse_sam_logits, metric_record, file_sha256
 from tools.phase4e1 import tensor_state_sha256
 from tools.phase4f import invalid_record, mask_loss
 
-OUT = ROOT / "results/phase6g16_type2_utility"
+OUT = ROOT / "outputs/phase6g16_type2_utility"
 DOC = ROOT / "docs/phase6g16_type2_correction_aware_utility.md"
 G15 = ROOT / "outputs/phase6g15_residual_staged_optimization/arms/A2/selected_checkpoint.pt"
 SEED, EPOCHS, BATCH, LR, WD, CLIP = 3407, 10, 8, 1e-4, 1e-4, 1.0
@@ -219,14 +219,21 @@ def bootstrap_mean(x,seed=3407,n=10000):
 
 
 def diagnostics(model,collapsed,sam,fusion,projection,head,p4,fs,dev,cache,device):
-    model.eval();permch=torch.randperm(256,generator=torch.Generator().manual_seed(SEED)).to(device);permsp=torch.randperm(4096,generator=torch.Generator().manual_seed(SEED+1)).to(device)
+    model.eval();permch=torch.randperm(256,generator=torch.Generator().manual_seed(SEED)).to(device)
     vals={k:[] for k in ("identity_repeat","cross_image","channel_shuffle","spatial_shuffle","direction_flip")};signed={k:[] for k in vals if k!="identity_repeat"};unorm=[];cnorm=[];image_u=[];image_c=[];per=[]
     validids=[i for i,v in enumerate(cache["valid"]) if bool(v)];cycle={i:validids[(j+1)%len(validids)] for j,i in enumerate(validids)}
     with torch.no_grad():
         for i in validids:
             sid=dev["sample_ids"][i];s64,_,_,sc,cc=phase4f_spatial_batch(p4,[sid],device);f=g10.fused_evidence(fusion,projection,fs,[sid],device);z=head(f.float());b,_=c1_language_batch(dev,cache,torch.tensor([i]),p4,sam,device);_,_,c,support=rect_forward(collapsed,s64,f,sc,cc)
             j=cycle[i];fj=g10.fused_evidence(fusion,projection,fs,[dev["sample_ids"][j]],device);_,_,cx,_=rect_forward(collapsed,s64,fj,sc,cc)
-            cch=c[:,permch];flat=c.flatten(2);csp=flat[:,:,permsp].reshape_as(c);csp=csp*support
+            cch=c[:,permch]
+            # Strict within-support spatial permutation: preserve global and
+            # per-channel norms and never move correction into/out of invalid cells.
+            csp=c.clone(); valid_flat=support[0,0].flatten().bool(); valid_idx=valid_flat.nonzero(as_tuple=False).flatten()
+            local_perm=torch.randperm(len(valid_idx),generator=torch.Generator(device="cpu").manual_seed(SEED+1+i)).to(device)
+            src=valid_idx.index_select(0,local_perm); dst=valid_idx
+            csp_flat=csp.flatten(2); c_flat=c.flatten(2)
+            csp_flat[0,:,dst]=c_flat[0,:,src]
             variants={"cross_image":cx,"channel_shuffle":cch,"spatial_shuffle":csp,"direction_flip":-c}
             ur=model(s64,c,b["q_seg"],support)["U"];ur2=model(s64,c,b["q_seg"],support)["U"]
             mask=support.bool();base=ur[mask].float();vals["identity_repeat"].extend((base-ur2[mask].float()).abs().cpu().tolist());local={"sample_id":sid,"mean_U":float(base.mean()),"global_C_norm":float(c.norm())}
