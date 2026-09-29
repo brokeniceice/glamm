@@ -1,0 +1,47 @@
+experiment:
+  name: phase6n0_low_rank_evidence_r2
+  seed: 3407
+  output_root: outputs/phase6n0_low_rank_evidence_r2
+  checkpoint_root: /data/yz/groundingLMM_official/checkpoints/phase6n0_low_rank_evidence_r2
+  c2_cache_root: /data/yz/groundingLMM_official/cache/phase6l0_r2
+  basis: outputs/phase6m0_r1_intervention/train_basis.pt
+architecture:
+  frozen_uncentered_delta_basis_rank: 2
+  semantic_width: 64
+  forensic_width: 64
+  mixer_width: 64
+  local_residual_blocks: 1
+  coefficient_head_final_zero: true
+  coefficient_activation: none
+  authority_activation: sigmoid
+  geometry: audited_clip_crop_to_padded_sam64
+training:
+  epochs: 10
+  batch_size: 8
+  optimizer: AdamW
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0
+  scheduler: none
+  gradient_accumulation: none
+  precision: bf16_autocast
+  order: Python_Random_seed_plus_1009_times_epoch
+  cross: canonical_cyclic_next_image
+  shuffle: fixed_randperm_576_CPU_seed_3407
+loss:
+  mask_bce_weight: 2.0
+  mask_dice_weight: 0.5
+  relative_weight: 1.0
+  rank_weight: 1.0
+  rank_margin: 0.1
+selection:
+  population: canonical_internal_DEV_all_1106
+  primary: mean_foreground_iou
+  tie: earlier_epoch
+  bootstrap_repeats: 2000
+  bootstrap_seed: 3407
+firewall:
+  internal_test: sealed
+  official1000: sealed
+  localization_ood: sealed
+  no_architecture_search: true

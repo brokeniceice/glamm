@@ -93,60 +93,58 @@ def localization_row(label, condition, n, mean_iou, mean_f1, global_iou, global_
 
 
 def append_report(result):
-    checkpoint_sha = result["selected_checkpoint_sha256"]
     internal = result["internal_test"]["modes"]["detection"]["classification_head"]
     internal = {**internal, "n": result["internal_test"]["samples"]}
     ood = result["classification_ood"]["datasets"]
     official = result["official1000"]["modes"]["G0"]
-    lines = [
-        "<!-- PHASE6J0_C2_BEGIN -->",
-        "\n## C2 Pre-LN cross attention｜本轮阶段性评测\n",
-        f"选模 checkpoint：`{checkpoint_sha}`（epoch {result['selected_epoch']}，step {result['selected_step']}）。"
-        "C2 是 RINE query / CLIP patch K,V 的单层交叉注意力，分类使用 raw H2 阈值 0.5；"
-        "从第 3,500 步的完整 checkpoint 恢复，仍用每卡 batch 10、双卡全局 batch 20。"
-        "C2 未接入 R1 定位矫正器；历史 C1 为单卡训练，以下差异不是严格 matched 单变量因果效应。\n",
-        "### 分类｜内部测试集\n",
-        "| 模型 | N | Accuracy | F1 | ROC-AUC | Fake recall | TNR | FPR |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
-        classification_row("C2-raw", internal),
-        "\n### 分类｜外部 OOD\n",
+    sections = [
+        ("### Internal2208（Real 1104，Fake 1104）", classification_row("C2-raw", internal)),
+        ("### AIGI-Holmes TestSet（Real 50,000，Fake 49,999）",
+         classification_row("C2-raw", ood["aigi_holmes"]["classification_head"])),
+        ("### GenImage held-out（Real 50,000，Fake 50,000）",
+         classification_row("C2-raw", ood["genimage"]["classification_head"])),
+        ("### LOKI 分类（Real 900，Fake 1,317）",
+         classification_row("C2-raw", ood["loki"]["classification_head"])),
+        ("### RAISE998（Real 998，Fake 0）",
+         classification_row("C2-raw", ood["raise998"]["classification_head"])),
+        ("### SynthScars Official1000（官方 polygon union，空 GT 0）",
+         localization_row("C2-raw", "G0", official["num_gt_fake"],
+                          official["per_image_mean"]["foreground_iou"],
+                          official["per_image_mean"]["foreground_f1"],
+                          official["global_pixel"]["foreground_iou"],
+                          official["global_pixel"]["foreground_f1"])),
     ]
-    for name, title in (("aigi_holmes", "AIGI-Holmes TestSet"),
-                        ("genimage", "GenImage held-out"),
-                        ("loki", "LOKI 分类"), ("raise998", "RAISE998")):
-        lines.extend([f"#### {title}\n", "| 模型 | N | Accuracy | F1 | ROC-AUC | Fake recall | TNR | FPR |",
-                      "|---|---:|---:|---:|---:|---:|---:|---:|",
-                      classification_row("C2-raw", ood[name]["classification_head"]), ""])
-    lines.extend([
-        "RAISE998 只有 Real，F1、ROC-AUC、Fake recall 不作为双类指标解释。"
-        "AIGI-Holmes 的既有 internal-TRAIN exact 重叠审计仍适用，未删除重叠样本。\n",
-        "### 定位｜SynthScars Official1000\n",
-        "| 模型 | 条件 | N | Mean FG IoU | Mean FG F1 | Global FG IoU | Global FG F1 |",
-        "|---|---|---:|---:|---:|---:|---:|",
-        localization_row("C2-raw", "G0", official["num_gt_fake"],
-                         official["per_image_mean"]["foreground_iou"],
-                         official["per_image_mean"]["foreground_f1"],
-                         official["global_pixel"]["foreground_iou"],
-                         official["global_pixel"]["foreground_f1"]),
-    ])
-    lines.extend([
-        "本轮只评测内部测试集、外部 OOD 分类和 Official1000 定位；C2 外部 OOD 定位留待接入 R1 后评测。"
-        "逐图预测、manifest 哈希、checkpoint 身份和分类 GenImage 分生成器指标见 "
-        "[C2 阶段性评测汇总](../outputs/phase6j0_c2/final_evaluation/results.json)。"
-        "Official1000 在内部 validation 选模之后运行；外部 OOD 未用于选模或阈值调整。",
-        "<!-- PHASE6J0_C2_END -->",
-    ])
-    original = REPORT.read_text()
-    require("<!-- PHASE6J0_C2_BEGIN -->" not in original,
-            "C2 report section already exists; refusing duplicate append")
-    original_lines = original.splitlines()
-    for index, line in enumerate(original_lines):
+    lines = REPORT.read_text().splitlines()
+    for heading, row in sections:
+        require(lines.count(heading) == 1, f"C2 report heading drift: {heading}")
+        start = lines.index(heading)
+        separator = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("|---")), None)
+        require(separator is not None, f"C2 report table missing: {heading}")
+        end = separator + 1
+        while end < len(lines) and lines[end].startswith("|"):
+            end += 1
+        require(not any("| C2-raw |" in value for value in lines[separator:end]),
+                f"C2-raw row already exists: {heading}")
+        lines.insert(end, row)
+    model_description = ("- **C2-raw** 是选定 C2 checkpoint（epoch 7、step 3500）的原始 H2 分类口径，"
+                         "Fake 概率阈值 0.5；尚未接入 R1。Official1000 为同一 C2 的 canonical G0 定位。"
+                         "C2 与历史 C1 的训练设备与预算不同，不能把差异严格归因于交叉注意力。")
+    anchor = "- **legion-retrained-match**"
+    require(sum(value.startswith(anchor) for value in lines) == 1, "C2 model-description anchor drift")
+    lines.insert(next(i for i, value in enumerate(lines) if value.startswith(anchor)), model_description)
+    source = ("- C2-raw 的内部测试、四组外部分类 OOD 与 Official1000 定位使用同一选定 checkpoint；"
+              "逐图结果、清单与 checkpoint 哈希见[C2 阶段性评测汇总]"
+              "(../outputs/phase6j0_c2/final_evaluation/results.json)。C2 外部定位 OOD 留待接入 R1 后评测。")
+    anchor = "- NPR 分类结果来源："
+    require(sum(value.startswith(anchor) for value in lines) == 1, "C2 source anchor drift")
+    lines.insert(next(i for i, value in enumerate(lines) if value.startswith(anchor)), source)
+    for index, line in enumerate(lines):
         if line.startswith("更新："):
-            original_lines[index] = f"更新：{now()[:10]}。数值保留六位小数；`-` 表示缺少可报告结果或指标不适用。每个数据集单独一表。"
-            break
-    original = "\n".join(original_lines) + "\n"
+            lines[index] = f"更新：{now()[:10]}。数值保留六位小数；`-` 表示缺少可报告结果或指标不适用。每个数据集单独一表。"
+        if line.startswith("P1、P1-old R1、C1-native R1 为 canonical G0；"):
+            lines[index] = line.replace("C1-native R1 为", "C1-native R1、C2-raw 为", 1)
     temporary = REPORT.with_suffix(".md.tmp")
-    temporary.write_text(original.rstrip() + "\n\n" + "\n".join(lines) + "\n")
+    temporary.write_text("\n".join(lines).rstrip() + "\n")
     os.replace(temporary, REPORT)
 
 

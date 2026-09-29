@@ -29,6 +29,9 @@ class PreLNCrossAttention(nn.Module):
         nn.init.zeros_(self.w_o.bias)
         self.last_stats: dict[str, float] = {}
         self.last_gradient_norms: dict[str, float] = {}
+        # Optional read-only Phase6K capture. The numerical forward below is unchanged.
+        self.capture_spatial_intermediates = False
+        self.last_spatial_intermediates = None
         for name, parameter in self.named_parameters():
             parameter.register_hook(self._gradient_hook(name))
 
@@ -51,6 +54,16 @@ class PreLNCrossAttention(nn.Module):
         scores = (q.float() @ k.float().transpose(-1, -2)) / math.sqrt(self.head_dim)
         probabilities = scores.softmax(dim=-1)
         context = (probabilities.to(v.dtype) @ v).transpose(1, 2).reshape(batch, 1, -1)
+        if self.capture_spatial_intermediates:
+            if count != 24 * 24 or self.heads != 8 or self.head_dim != 64:
+                raise ValueError("Phase6K requires the trained 8x64, 24x24 C2 layout")
+            weighted = probabilities.float().squeeze(2).unsqueeze(-1) * v.float()
+            self.last_spatial_intermediates = {
+                "A": probabilities.detach().squeeze(2).reshape(batch, 8, 24, 24).cpu(),
+                "E": weighted.detach().permute(0, 1, 3, 2).reshape(batch, 512, 24, 24).cpu(),
+                "head_context": context.detach().reshape(batch, 8, 64).cpu(),
+                "fused_input": r.detach().cpu(),
+            }
         delta = self.w_o(context).to(r.dtype)
         fused = r + delta
         with torch.no_grad():

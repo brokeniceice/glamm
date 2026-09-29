@@ -1,0 +1,40 @@
+experiment:
+  name: phase6l0_c2_r2
+  seed: 3407
+  c2_checkpoint_sha256: 4a67e6a87c453d554fa5bd6cf93329ae54c1c2853f0925dc7a63397eef27e8ce
+  cache_root: /data/yz/groundingLMM_official/cache/phase6l0_r2
+  output_root: outputs/phase6l0_r2
+  checkpoint_root: /data/yz/groundingLMM_official/checkpoints/phase6l0_r2
+architecture:
+  evidence_blocks: 3
+  bridge_heads: 8
+  bridge_samples_per_head: 4
+  bridge_head_dim: 32
+  bridge_max_offset_sam_cells: 4
+  adapter_blocks: 3
+  final_residual_zero_init: true
+training:
+  epochs: 10
+  batch_size: 8
+  optimizer: AdamW
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  gradient_clip_norm: 1.0
+  scheduler: none
+  gradient_accumulation: none
+  precision: bf16_autocast
+  order: Python_Random_seed_plus_1009_times_epoch
+loss:
+  mask_bce_weight: 2.0
+  mask_dice_weight: 0.5
+  only_final_frozen_sam_mask: true
+selection:
+  population: canonical_internal_DEV_all_1106
+  primary: mean_foreground_iou
+  tie: earlier_epoch
+  bootstrap_repeats: 2000
+  bootstrap_seed: 3407
+firewall:
+  internal_test: sealed
+  official1000: sealed
+  localization_ood: sealed

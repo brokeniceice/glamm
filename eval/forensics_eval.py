@@ -607,6 +607,9 @@ class GLaMMForensicsBackend:
                 ).hexdigest()
             ),
             "raw_prompt_text": batch.get("conversation_list", [None])[0],
+            "projected_seg_embeddings": generation_details.get(
+                "projected_seg_embeddings", [None]
+            )[0],
             "assistant_prefix": "[CLS] [FAKE]" if assistant_content else "[CLS]",
             "seg_probability_trace": trace,
             **stop,
